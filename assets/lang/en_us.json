@@ -1,15 +1,14 @@
 {
-  "launcher.title": "",
-  "launcher.play": "",
-  "launcher.status.metadata": "",
-  "launcher.status.checking": "",
-  "launcher.status.downloading": "",
-  "launcher.status.preparing_java": "",
-  "launcher.status.starting": "",
-  "launcher.status.running": "",
-  "launcher.status.failed": "",
-  "launcher.status.failed.details": "",
-  "launcher.profile.unnamed": "",
-  "launcher.window.close": "",
-  "launcher.window.minimise": ""
+  "play": "Launch",
+  "status.metadata": "",
+  "status.checking": "Checking...",
+  "status.downloading": "",
+  "status.preparing_java": "",
+  "status.starting": "",
+  "status.failed": "",
+  "status.failed.details": "",
+  "profile.unnamed": "Unnamed Profile",
+  "window.close": "",
+  "window.minimise": "",
+  "status.stop": "Stop"
 }

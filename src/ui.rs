@@ -16,7 +16,7 @@ use crate::lang::{tr, tr_args};
 use crate::launch::{self, Step};
 use crate::profiles::Profiles;
 use crate::theme::{self, place};
-use crate::window_shape;
+use crate::{game_window, window_shape};
 
 /// Developer options for visual checks (`--screenshot <png>`, `--open-dropdown account|profile`,
 /// `--state downloading|checking|failed`, `--focus play|account`).
@@ -26,19 +26,22 @@ pub struct DevOptions {
     pub open_dropdown: Option<String>,
     pub state: Option<String>,
     pub focus: Option<String>,
+    pub open_sidebar: bool,
 }
 
 #[derive(Clone, Copy, PartialEq)]
 enum PlayLook {
     Ready,
     Busy,
+    Stop,
     Failed,
 }
 
 enum Phase {
     Idle,
     Working(Option<Step>),
-    Running(Child),
+    /// The game is running. `stopping`: the player asked it to close.
+    Running { child: Child, stopping: bool },
     Failed(String),
 }
 
@@ -60,6 +63,8 @@ struct HermesApp {
     frames: u32,
     /// Developer focus target, applied once the widgets exist (areas skip their first frame).
     focus: Option<Id>,
+    /// Developer option: keep the sidebar expanded.
+    force_sidebar: bool,
 }
 
 const ACCOUNT_DROPDOWN: &str = "account_dropdown";
@@ -73,6 +78,7 @@ impl HermesApp {
             _ => {}
         }
         theme::apply_style(ctx);
+        theme::install_fonts(ctx);
         let loaded = launch::Paths::new().and_then(|paths| Ok((Profiles::load(&paths.root)?, paths.root)));
         let (profiles, root, mut phase) = match loaded {
             Ok((profiles, root)) => (profiles, Some(root), Phase::Idle),
@@ -83,6 +89,12 @@ impl HermesApp {
             Some("downloading") => phase = Phase::Working(Some(Step::Downloading { done: 2100, total: 5247 })),
             Some("checking") => phase = Phase::Working(Some(Step::Checking)),
             Some("failed") => phase = Phase::Failed("example error".into()),
+            // A harmless short-lived process stands in for the game.
+            Some("running") => {
+                if let Ok(child) = std::process::Command::new("ping").args(["-n", "20", "127.0.0.1"]).stdout(std::process::Stdio::null()).spawn() {
+                    phase = Phase::Running { child, stopping: false };
+                }
+            }
             _ => {}
         }
         let focus = match dev.focus.as_deref() {
@@ -92,6 +104,7 @@ impl HermesApp {
         };
         let profile_icons = root.as_deref().map(|r| load_profile_icons(ctx, r, &profiles)).unwrap_or_default();
         HermesApp {
+            force_sidebar: dev.open_sidebar,
             focus,
             profile_icons,
             phase: Arc::new(Mutex::new(phase)),
@@ -114,7 +127,7 @@ impl HermesApp {
             .profiles
             .iter()
             .map(|p| dropdown::Item {
-                label: p.info.name.clone().unwrap_or_else(|| tr("launcher.profile.unnamed")),
+                label: p.info.name.clone().unwrap_or_else(|| tr("profile.unnamed")),
                 icon: self.profile_icons.get(&p.id).map(|t| dropdown::Icon::Image(t.id())),
             })
             .collect();
@@ -153,7 +166,12 @@ impl HermesApp {
             self.visible = window_shape::clip(frame, |v| {
                 let area = Rect::from_min_size(content.min, vec2(v.width as f32, v.height as f32) / ppp);
                 let (main, sidebar) = theme::frame_layout(area);
-                vec![to_px(main.expand(theme::EDGE_MARGIN)), to_px(sidebar.expand(theme::EDGE_MARGIN))]
+                // The expanded sidebar is included so it can grow over the window; while
+                // collapsed that area is fully transparent.
+                vec![
+                    to_px(main.expand(theme::EDGE_MARGIN)),
+                    to_px(theme::sidebar_expanded(sidebar).expand(theme::EDGE_MARGIN) + egui::Margin { right: theme::SIDEBAR_BOUNCE_ROOM as i8, ..Default::default() }),
+                ]
             })
             .map(|v| vec2(v.width as f32, v.height as f32) / ppp);
             self.region_size = Some(size);
@@ -175,7 +193,7 @@ impl HermesApp {
                 }
             };
             let next = match launch::launch(&game_dir, &report) {
-                Ok(launched) => Phase::Running(launched.child),
+                Ok(launched) => Phase::Running { child: launched.child, stopping: false },
                 Err(e) => Phase::Failed(format!("{e:#}")),
             };
             *phase.lock().unwrap() = next;
@@ -186,14 +204,59 @@ impl HermesApp {
     /// Returns to idle when the game exits; a crash is shown as a failure.
     fn poll_game(&self, ctx: &Context) {
         let mut phase = self.phase.lock().unwrap();
-        if let Phase::Running(child) = &mut *phase {
+        if let Phase::Running { child, stopping } = &mut *phase {
             match child.try_wait() {
                 Ok(None) => ctx.request_repaint_after(Duration::from_secs(1)),
+                // Exiting after Stop is expected, whatever the exit code.
+                Ok(Some(_)) if *stopping => *phase = Phase::Idle,
                 Ok(Some(status)) if status.success() => *phase = Phase::Idle,
                 Ok(Some(status)) => *phase = Phase::Failed(format!("Minecraft exited with {status}")),
                 Err(e) => *phase = Phase::Failed(e.to_string()),
             }
         }
+    }
+
+    /// Stop: asks the game's window to close (it saves and exits like its own
+    /// close button). If it has no window yet, or Stop is pressed again, the
+    /// process is ended.
+    fn stop_game(&self) {
+        let mut phase = self.phase.lock().unwrap();
+        if let Phase::Running { child, stopping } = &mut *phase {
+            if *stopping || !game_window::request_close(child.id()) {
+                let _ = child.kill();
+            }
+            *stopping = true;
+        }
+    }
+
+    /// Full-height sidebar that overhangs the window and, while hovered, expands
+    /// over it like a dropdown (same glass, outline and timing). Its contents are
+    /// not designed yet; for now it carries the logo.
+    fn sidebar(&self, ctx: &Context, collapsed: Rect, logo: Rect) {
+        let id = Id::unique("sidebar");
+        let expanded = theme::sidebar_expanded(collapsed);
+        // `open` is the direction the sidebar is moving in. It stays open while the
+        // pointer is anywhere over the expanded panel, and it only changes direction
+        // once a move has finished: opening always fully opens, closing fully closes.
+        // It moves on the same spring as button presses, so it bounces the same way.
+        let open = ctx.data(|d| d.get_temp::<bool>(id)).unwrap_or(false);
+        let (_, settled) = theme::spring(ctx, id, if open { 1.0 } else { 0.0 });
+        let hover_area = if open { expanded } else { collapsed };
+        let wants_open = self.force_sidebar || ctx.pointer_hover_pos().is_some_and(|p| hover_area.contains(p));
+        let open = if settled { wants_open } else { open };
+        ctx.data_mut(|d| d.insert_temp(id, open));
+        let (progress, _) = theme::spring(ctx, id, if open { 1.0 } else { 0.0 });
+        // Opening overshoots past full width; closing never goes narrower than
+        // collapsed, which would uncover the window edge it hides.
+        let t = progress.max(0.0);
+        let width = egui::emath::lerp(collapsed.width()..=expanded.width(), t);
+        let rect = Rect::from_min_size(collapsed.min, vec2(width, collapsed.height()));
+        egui::Area::new(id).order(egui::Order::Middle).fixed_pos(rect.min).show(ctx, |ui| {
+            ui.allocate_rect(rect, Sense::hover());
+            let painter = ui.painter();
+            theme::glass(&painter.with_clip_rect(rect.expand(24.0)), rect, theme::WINDOW_RADIUS, t.min(1.0), 0);
+            painter.image(self.logo.id(), logo, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), egui::Color32::WHITE);
+        });
     }
 
     fn title_bar(&self, ui: &mut egui::Ui, bar: Rect) {
@@ -202,25 +265,27 @@ impl HermesApp {
         if drag.drag_started() {
             ctx.send_viewport_cmd(ViewportCommand::StartDrag);
         }
+        // Brand wordmark in Amsterdam Four (not translated).
         ui.painter().text(
-            pos2(bar.min.x + 12.0, bar.center().y + 2.0),
+            // The script's tall capitals rise well above the text box, so it sits low in the bar.
+            pos2(bar.min.x + 22.0, bar.center().y + 17.0),
             Align2::LEFT_CENTER,
-            tr("launcher.title"),
-            FontId::proportional(13.0),
-            theme::TEXT_DIM,
+            "Hermes",
+            theme::wordmark_font(32.0),
+            theme::TEXT,
         );
 
         let size = vec2(32.0, 24.0);
         let close = Rect::from_center_size(pos2(bar.max.x - 30.0, bar.center().y + 2.0), size);
         let minimise = close.translate(vec2(-(size.x + 6.0), 0.0));
-        if bar_button(ui, close, "launcher.window.close", true, |p, c, color| {
+        if bar_button(ui, close, "window.close", true, |p, c, color| {
             let d = 4.5;
             p.line_segment([c + vec2(-d, -d), c + vec2(d, d)], Stroke::new(theme::ICON_STROKE, color));
             p.line_segment([c + vec2(-d, d), c + vec2(d, -d)], Stroke::new(theme::ICON_STROKE, color));
         }) {
             ctx.send_viewport_cmd(ViewportCommand::Close);
         }
-        if bar_button(ui, minimise, "launcher.window.minimise", false, |p, c, color| {
+        if bar_button(ui, minimise, "window.minimise", false, |p, c, color| {
             p.line_segment([c + vec2(-5.0, 0.0), c + vec2(5.0, 0.0)], Stroke::new(theme::ICON_STROKE, color));
         }) {
             ctx.send_viewport_cmd(ViewportCommand::Minimized(true));
@@ -229,21 +294,21 @@ impl HermesApp {
 
     fn play_button(&self, ui: &mut egui::Ui, rect: Rect) {
         let (label, progress, look, error) = match &*self.phase.lock().unwrap() {
-            Phase::Idle => (tr("launcher.play"), None, PlayLook::Ready, None),
+            Phase::Idle => (tr("play"), None, PlayLook::Ready, None),
             Phase::Working(step) => match step {
-                None | Some(Step::Metadata) => (tr("launcher.status.metadata"), None, PlayLook::Busy, None),
-                Some(Step::Checking) => (tr("launcher.status.checking"), None, PlayLook::Busy, None),
+                None | Some(Step::Metadata) => (tr("status.metadata"), None, PlayLook::Busy, None),
+                Some(Step::Checking) => (tr("status.checking"), None, PlayLook::Busy, None),
                 Some(Step::Downloading { done, total }) => (
-                    tr_args("launcher.status.downloading", &[&done.to_string(), &total.to_string()]),
+                    tr_args("status.downloading", &[&done.to_string(), &total.to_string()]),
                     Some(*done as f32 / (*total).max(1) as f32),
                     PlayLook::Busy,
                     None,
                 ),
-                Some(Step::PreparingJava) => (tr("launcher.status.preparing_java"), None, PlayLook::Busy, None),
-                Some(Step::Starting | Step::JavaCacheSkipped(_)) => (tr("launcher.status.starting"), None, PlayLook::Busy, None),
+                Some(Step::PreparingJava) => (tr("status.preparing_java"), None, PlayLook::Busy, None),
+                Some(Step::Starting | Step::JavaCacheSkipped(_)) => (tr("status.starting"), None, PlayLook::Busy, None),
             },
-            Phase::Running(_) => (tr("launcher.status.running"), None, PlayLook::Busy, None),
-            Phase::Failed(e) => (tr("launcher.status.failed"), None, PlayLook::Failed, Some(e.clone())),
+            Phase::Running { .. } => (tr("status.stop"), None, PlayLook::Stop, None),
+            Phase::Failed(e) => (tr("status.failed"), None, PlayLook::Failed, Some(e.clone())),
         };
         let enabled = look != PlayLook::Busy;
 
@@ -266,7 +331,19 @@ impl HermesApp {
                 painter.rect_filled(rect, radius, fill);
                 theme::PLAY_TEXT
             }
-            // Working or running: a muted green that still reads as "Play", with light text.
+            // Running: red Stop button.
+            PlayLook::Stop => {
+                let fill = if pressed {
+                    theme::STOP.lerp_to_gamma(theme::BG, 0.2)
+                } else if response.hovered() {
+                    theme::STOP.lerp_to_gamma(egui::Color32::WHITE, 0.08)
+                } else {
+                    theme::STOP
+                };
+                painter.rect_filled(rect, radius, fill);
+                egui::Color32::WHITE
+            }
+            // Working: a muted blue that still reads as "Play", with light text.
             PlayLook::Busy => {
                 painter.rect_filled(rect, radius, theme::PLAY.lerp_to_gamma(theme::PANEL, 0.6));
                 theme::TEXT
@@ -301,9 +378,13 @@ impl HermesApp {
         }
 
         if let Some(error) = error {
-            response = response.on_hover_text(tr_args("launcher.status.failed.details", &[&error]));
+            response = response.on_hover_text(tr_args("status.failed.details", &[&error]));
         }
         if enabled && response.on_hover_cursor(CursorIcon::PointingHand).clicked() {
+            if look == PlayLook::Stop {
+                self.stop_game();
+                return;
+            }
             self.start(ui.ctx());
         }
     }
@@ -399,14 +480,8 @@ impl eframe::App for HermesApp {
         let (window, sidebar) = theme::frame_layout(area);
 
         let painter = ui.painter().clone();
-        let stroke = Stroke::new(theme::STROKE_WIDTH, theme::OUTLINE);
-        let window_radius = theme::radius(theme::WINDOW_RADIUS);
-        painter.rect_filled(window, window_radius, theme::BG);
-        painter.rect_stroke(window, window_radius, stroke, StrokeKind::Inside);
-
-        // Sidebar: full height and a little bigger than the main window, so it overhangs it.
-        painter.rect_filled(sidebar, window_radius, theme::PANEL);
-        painter.rect_stroke(sidebar, window_radius, stroke, StrokeKind::Inside);
+        painter.rect_filled(window, theme::radius(theme::WINDOW_RADIUS), theme::BG);
+        theme::outline(&painter, window, theme::WINDOW_RADIUS);
 
         // Custom bar across the top of the main window, right of the sidebar.
         let bar = Rect::from_min_max(pos2(sidebar.max.x, window.min.y), pos2(window.max.x, window.min.y + theme::BAR_HEIGHT));
@@ -414,17 +489,17 @@ impl eframe::App for HermesApp {
         // The template's main column sits below the bar (x positions include the sidebar).
         let body = Rect::from_min_max(pos2(window.min.x, bar.max.y), window.max);
 
-        // Logo: template size, centred in the sidebar with equal side and top margins.
+        // Main content area: contents not designed yet.
+        let content = place(body, 78.0, 78.0, 1248.0, 579.0);
+        painter.rect_filled(content, theme::radius(theme::PANEL_RADIUS), theme::PANEL);
+        theme::outline(&painter, content, theme::PANEL_RADIUS);
+
+        // Logo: template size, centred in the collapsed sidebar with equal side and top margins.
         let logo_area = place(window, 10.0, 12.0, 46.0, 40.0);
         let logo_size = logo_area.width().min(logo_area.height());
         let margin = (sidebar.width() - logo_size) / 2.0;
         let logo = Rect::from_min_size(sidebar.min + egui::Vec2::splat(margin), egui::Vec2::splat(logo_size));
-        painter.image(self.logo.id(), logo, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), egui::Color32::WHITE);
-
-        // Main content area: contents not designed yet.
-        let content = place(body, 78.0, 78.0, 1248.0, 579.0);
-        painter.rect_filled(content, theme::radius(theme::PANEL_RADIUS), theme::PANEL);
-        painter.rect_stroke(content, theme::radius(theme::PANEL_RADIUS), stroke, StrokeKind::Inside);
+        self.sidebar(&ctx, sidebar, logo);
 
         self.play_button(ui, place(body, 1070.0, 675.0, 256.0, 58.0));
         // Profile selector: left of Play, same size, opens upward (owner request, no mock-up yet).

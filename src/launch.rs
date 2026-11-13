@@ -25,23 +25,25 @@ const ASSET_BASE: &str = "https://resources.download.minecraft.net";
 const MOJANG_LIBRARIES: &str = "https://libraries.minecraft.net/";
 
 /// Data folder name under `%APPDATA%`, separate from the official launcher.
-const DATA_DIR: &str = "hermes_client";
-/// Earlier builds used this name; its contents move to `DATA_DIR` once.
-const LEGACY_DATA_DIR: &str = ".hermes";
+const DATA_DIR: &str = "HermesClient";
+/// Names earlier builds used, newest first; the first one found moves to `DATA_DIR` once.
+const LEGACY_DATA_DIRS: [&str; 2] = ["hermes_client", ".hermes"];
 
-/// `<appdata>/hermes_client`, created if missing. Moves the old `.hermes`
-/// folder there (same volume, so a rename) instead of downloading everything again.
+/// `<appdata>/HermesClient`, created if missing. On first run it takes over the
+/// folder an earlier build used (same volume, so a rename) instead of
+/// downloading everything again. Other old folders are left untouched.
 fn data_root(appdata: &Path) -> Result<PathBuf> {
     let root = appdata.join(DATA_DIR);
-    let legacy = appdata.join(LEGACY_DATA_DIR);
-    if !root.exists() && legacy.is_dir() {
-        std::fs::rename(&legacy, &root).with_context(|| format!("moving {} to {}", legacy.display(), root.display()))?;
+    if !root.exists() {
+        if let Some(legacy) = LEGACY_DATA_DIRS.iter().map(|n| appdata.join(n)).find(|p| p.is_dir()) {
+            std::fs::rename(&legacy, &root).with_context(|| format!("moving {} to {}", legacy.display(), root.display()))?;
+        }
     }
     std::fs::create_dir_all(&root).with_context(|| format!("creating {}", root.display()))?;
     Ok(root)
 }
 
-/// Everything lives under `%APPDATA%\hermes_client`.
+/// Everything lives under `%APPDATA%\HermesClient`.
 pub struct Paths {
     pub root: PathBuf,
     libraries: PathBuf,
@@ -375,18 +377,18 @@ mod tests {
     }
 
     #[test]
-    fn data_root_moves_legacy_folder_once() {
+    fn data_root_moves_newest_legacy_folder_once() {
         let appdata = std::env::temp_dir().join(format!("hermes-appdata-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&appdata);
-        std::fs::create_dir_all(appdata.join(LEGACY_DATA_DIR).join("assets")).unwrap();
+        std::fs::create_dir_all(appdata.join("hermes_client").join("assets")).unwrap();
+        std::fs::create_dir_all(appdata.join(".hermes")).unwrap();
         let root = data_root(&appdata).unwrap();
         assert_eq!(root, appdata.join(DATA_DIR));
         assert!(root.join("assets").is_dir());
-        assert!(!appdata.join(LEGACY_DATA_DIR).exists());
-        // A later legacy folder is left alone once the new one exists.
-        std::fs::create_dir_all(appdata.join(LEGACY_DATA_DIR)).unwrap();
+        assert!(!appdata.join("hermes_client").exists());
+        // Once the new folder exists, older ones are never moved over it.
         assert_eq!(data_root(&appdata).unwrap(), root);
-        assert!(appdata.join(LEGACY_DATA_DIR).exists());
+        assert!(appdata.join(".hermes").exists());
         std::fs::remove_dir_all(&appdata).unwrap();
     }
 }

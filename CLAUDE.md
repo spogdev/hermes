@@ -20,8 +20,8 @@ Rust launcher (Windows 10/11) for Fabric Minecraft 26.1.2. UI is egui/eframe (gl
 
 - `cargo test`: unit tests.
 - `cargo run -- --headless`: runs the Start-button launch path without the window, prints
-  timings, waits for the game, fails if it crashes. Game output: `%APPDATA%\hermes_client\logs\game-output.log`.
-- Visual check (debug builds): `cargo run -- --screenshot shot.png [--open-dropdown account|profile] [--state downloading|checking|failed] [--focus play|account]` renders the
+  timings, waits for the game, fails if it crashes. Game output: `%APPDATA%\HermesClient\logs\game-output.log`.
+- Visual check (debug builds): `cargo run -- --screenshot shot.png [--open-dropdown account|profile] [--state downloading|checking|running|failed] [--focus play|account] [--open-sidebar]` renders the
   window, saves it as a PNG once animations settle, and exits.
 
 ## Code map
@@ -31,5 +31,5 @@ Rust launcher (Windows 10/11) for Fabric Minecraft 26.1.2. UI is egui/eframe (gl
   empty value and list it in `app-design.md`.
 - `dropdown.rs`: the one dropdown component (glass, expand in place, arrow-to-check morph).
 - `ui.rs`: main window. `launch.rs`: install + start the game, reports progress as `Step`.
-- `profiles.rs`: profiles (`profiles/<uuid>/profile.json`, each folder is that profile's game folder). `window_shape.rs`: rounded window clip.
+- `profiles.rs`: profiles (`profiles/<name>/profile.json`, each folder is that profile's game folder). `window_shape.rs`: rounded window clip. `game_window.rs`: Stop (close the game window).
 - The egui screenshot shows the app's own frame only; window-shape changes need a real screen check.

@@ -2,6 +2,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod download;
+mod game_window;
 mod dropdown;
 mod lang;
 mod launch;
@@ -30,7 +31,7 @@ fn main() -> ExitCode {
 }
 
 /// Debug builds only: `--screenshot <png>` saves the window after it settles and
-/// exits; `--open-dropdown account|profile`, `--state downloading|checking|failed` and
+/// exits; `--open-dropdown account|profile`, `--state downloading|checking|running|failed`, `--open-sidebar` and
 /// `--focus play|account` set up the state to capture.
 #[cfg(debug_assertions)]
 fn dev_options(args: &[String]) -> ui::DevOptions {
@@ -39,6 +40,7 @@ fn dev_options(args: &[String]) -> ui::DevOptions {
         open_dropdown: value_of(args, "--open-dropdown"),
         state: value_of(args, "--state"),
         focus: value_of(args, "--focus"),
+        open_sidebar: args.iter().any(|a| a == "--open-sidebar"),
     }
 }
 

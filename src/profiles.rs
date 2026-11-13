@@ -1,7 +1,9 @@
-//! Launch profiles. Each profile is a folder `<data>/profiles/<uuid>/` that is
-//! also its Minecraft game folder (mods, config, saves, options). Inside it,
-//! `profile.json` holds the profile's details, and its icon image sits next to it.
-//! The selected profile is remembered in `<data>/launcher.json`.
+//! Launch profiles. Each profile is a folder `<data>/profiles/<name>/` that is
+//! also its Minecraft game folder (mods, config, saves, options). The folder is
+//! named after the profile's name when it is created (`Unnamed` without one, and
+//! `Name (1)`, `Name (2)`, ... when taken). Inside it, `profile.json` holds the
+//! profile's details, and its icon image sits next to it. The selected profile is
+//! remembered in `<data>/launcher.json`.
 //!
 //! Downloaded game files (libraries, assets, Java) are identical for every
 //! profile and stay shared in the data folder.
@@ -16,12 +18,16 @@ use uuid::Uuid;
 const PROFILES_DIR: &str = "profiles";
 const PROFILE_FILE: &str = "profile.json";
 const SETTINGS_FILE: &str = "launcher.json";
+/// A build briefly saved the settings under this name by mistake; moved back once.
+const MISNAMED_SETTINGS_FILE: &str = "json";
+/// Folder name for a profile without a name.
+const UNNAMED_FOLDER: &str = "Unnamed";
 
 /// Contents of `profile.json`. Add new details here; unknown fields in older
 /// or newer files are ignored and missing ones take their defaults.
 #[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
 pub struct ProfileInfo {
-    /// Owner-chosen name. `None` shows the `launcher.profile.unnamed` key.
+    /// Owner-chosen name. `None` shows the `profile.unnamed` key.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
     /// File name of the icon image inside the profile folder (PNG).
@@ -34,7 +40,7 @@ pub struct ProfileInfo {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Profile {
-    /// UUID; also the folder name.
+    /// The profile's folder name; fixed when it is created.
     pub id: String,
     pub info: ProfileInfo,
 }
@@ -69,12 +75,49 @@ fn valid_file_name(name: &str) -> bool {
     !name.is_empty() && name != "." && name != ".." && !name.contains(['/', '\\', ':'])
 }
 
+/// A Windows-safe folder name from a profile name: characters Windows forbids
+/// become `_`, trailing dots and spaces are dropped (Windows strips them), and
+/// reserved device names (`CON`, `COM1.txt`, ...) get a `_` in front.
+/// Empty or missing names become `Unnamed`.
+fn folder_base(name: Option<&str>) -> String {
+    let cleaned: String = name
+        .unwrap_or("")
+        .chars()
+        .map(|c| if c.is_control() || r#"<>:"/\|?*"#.contains(c) { '_' } else { c })
+        .collect();
+    let mut base = cleaned.trim().trim_end_matches(['.', ' ']).to_string();
+    if base.is_empty() {
+        return UNNAMED_FOLDER.to_string();
+    }
+    let stem = base.split('.').next().unwrap_or("").to_ascii_uppercase();
+    let reserved = matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL")
+        || (stem.len() == 4 && (stem.starts_with("COM") || stem.starts_with("LPT")) && stem.as_bytes()[3].is_ascii_digit());
+    if reserved {
+        base.insert(0, '_');
+    }
+    base
+}
+
+/// `base`, or `base (n)` with the lowest n ≥ 1 that isn't taken.
+/// (Windows folder names are case-insensitive, and so is `taken`.)
+fn unique_name(base: &str, taken: impl Fn(&str) -> bool) -> String {
+    if !taken(base) {
+        return base.to_string();
+    }
+    (1..).map(|n| format!("{base} ({n})")).find(|name| !taken(name)).unwrap()
+}
+
+/// Folder name for a new profile called `name` under `root`.
+fn new_folder_name(root: &Path, name: Option<&str>) -> String {
+    unique_name(&folder_base(name), |candidate| Profiles::dir(root, candidate).exists())
+}
+
 impl Profiles {
     pub fn dir(root: &Path, id: &str) -> PathBuf {
         root.join(PROFILES_DIR).join(id)
     }
 
-    /// Reads every `profiles/<uuid>/profile.json`, creating a default profile on
+    /// Reads every `profiles/<name>/profile.json`, creating a default profile on
     /// first run and converting the older layouts (see `migrate_legacy`).
     pub fn load(root: &Path) -> Result<Self> {
         std::fs::create_dir_all(root.join(PROFILES_DIR))?;
@@ -84,11 +127,7 @@ impl Profiles {
             profiles.push(create(root, ProfileInfo::default(), None)?);
         }
         profiles.sort_by(|a, b| (a.info.created, &a.id).cmp(&(b.info.created, &b.id)));
-        let settings: Settings = std::fs::read(root.join(SETTINGS_FILE))
-            .ok()
-            .and_then(|bytes| serde_json::from_slice(&bytes).ok())
-            .unwrap_or_default();
-        let selected = settings
+        let selected = read_settings(root)
             .selected_profile
             .filter(|id| profiles.iter().any(|p| &p.id == id))
             .unwrap_or_else(|| profiles[0].id.clone());
@@ -98,7 +137,7 @@ impl Profiles {
     /// Selects a profile and remembers the choice in `launcher.json`.
     pub fn select(&mut self, root: &Path, id: &str) -> Result<()> {
         self.selected = id.to_string();
-        write_json(&root.join(SETTINGS_FILE), &Settings { selected_profile: Some(self.selected.clone()) })
+        write_settings(root, &Settings { selected_profile: Some(self.selected.clone()) })
     }
 
     pub fn selected_index(&self) -> usize {
@@ -112,17 +151,26 @@ impl Profiles {
     }
 }
 
-/// Profiles are folders whose name is a UUID and that contain a readable `profile.json`.
+fn read_settings(root: &Path) -> Settings {
+    std::fs::read(root.join(SETTINGS_FILE))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+        .unwrap_or_default()
+}
+
+fn write_settings(root: &Path, settings: &Settings) -> Result<()> {
+    write_json(&root.join(SETTINGS_FILE), settings)
+}
+
+/// Profiles are the folders in `profiles/` that contain a readable `profile.json`.
 fn scan(root: &Path) -> Result<Vec<Profile>> {
     let mut profiles = Vec::new();
     for entry in std::fs::read_dir(root.join(PROFILES_DIR))? {
         let entry = entry?;
-        let Some(id) = entry.file_name().to_str().and_then(|n| Uuid::parse_str(n).ok()).map(|u| u.to_string()) else {
-            continue;
-        };
         if !entry.file_type()?.is_dir() {
             continue;
         }
+        let Some(id) = entry.file_name().to_str().map(str::to_string) else { continue };
         let Ok(bytes) = std::fs::read(entry.path().join(PROFILE_FILE)) else { continue };
         let Ok(info) = serde_json::from_slice::<ProfileInfo>(&bytes) else { continue };
         profiles.push(Profile { id, info });
@@ -130,9 +178,9 @@ fn scan(root: &Path) -> Result<Vec<Profile>> {
     Ok(profiles)
 }
 
-/// Creates a profile folder with a new UUID. `existing` is a game folder to move in.
+/// Creates a profile folder named after the profile. `existing` is a game folder to move in.
 fn create(root: &Path, mut info: ProfileInfo, existing: Option<&Path>) -> Result<Profile> {
-    let id = Uuid::new_v4().to_string();
+    let id = new_folder_name(root, info.name.as_deref());
     let dir = Profiles::dir(root, &id);
     match existing {
         Some(from) => std::fs::rename(from, &dir).with_context(|| format!("moving {} to {}", from.display(), dir.display()))?,
@@ -145,7 +193,7 @@ fn create(root: &Path, mut info: ProfileInfo, existing: Option<&Path>) -> Result
     Ok(Profile { id, info })
 }
 
-/// The previous layout: one `profiles.json` listing numbered folders.
+/// The layout before folders had names: one `profiles.json` listing numbered folders.
 #[derive(Deserialize)]
 struct LegacyProfiles {
     selected: String,
@@ -159,9 +207,17 @@ struct LegacyProfile {
     name: Option<String>,
 }
 
-/// Converts older layouts in place by renaming folders (nothing is deleted):
-/// `profiles.json` + `profiles/<n>/`, or the original single `instance/` folder.
+/// Converts older layouts in place by renaming (nothing is deleted):
+/// - settings saved as `json` by mistake go back to `launcher.json`;
+/// - `profiles.json` + `profiles/<n>/` become named profile folders;
+/// - the original single `instance/` folder becomes a profile;
+/// - profile folders named by UUID are renamed after their profile name.
 fn migrate_legacy(root: &Path) -> Result<()> {
+    let misnamed = root.join(MISNAMED_SETTINGS_FILE);
+    if misnamed.is_file() {
+        std::fs::rename(&misnamed, root.join(SETTINGS_FILE))?;
+    }
+
     let list = root.join("profiles.json");
     if let Ok(bytes) = std::fs::read(&list) {
         let legacy: LegacyProfiles = serde_json::from_slice(&bytes).with_context(|| format!("parsing {}", list.display()))?;
@@ -179,13 +235,26 @@ fn migrate_legacy(root: &Path) -> Result<()> {
                 selected = Some(profile.id);
             }
         }
-        write_json(&root.join(SETTINGS_FILE), &Settings { selected_profile: selected })?;
+        write_settings(root, &Settings { selected_profile: selected })?;
         std::fs::remove_file(&list)?;
-        return Ok(());
     }
+
     let instance = root.join("instance");
     if instance.is_dir() && scan(root)?.is_empty() {
         create(root, ProfileInfo::default(), Some(&instance))?;
+    }
+
+    let mut by_uuid: Vec<Profile> = scan(root)?.into_iter().filter(|p| Uuid::parse_str(&p.id).is_ok()).collect();
+    by_uuid.sort_by(|a, b| (a.info.created, &a.id).cmp(&(b.info.created, &b.id)));
+    let mut settings = read_settings(root);
+    for profile in by_uuid {
+        let name = new_folder_name(root, profile.info.name.as_deref());
+        let (from, to) = (Profiles::dir(root, &profile.id), Profiles::dir(root, &name));
+        std::fs::rename(&from, &to).with_context(|| format!("moving {} to {}", from.display(), to.display()))?;
+        if settings.selected_profile.as_deref() == Some(profile.id.as_str()) {
+            settings.selected_profile = Some(name);
+            write_settings(root, &settings)?;
+        }
     }
     Ok(())
 }
@@ -201,29 +270,95 @@ mod tests {
         root
     }
 
+    fn named(name: &str) -> ProfileInfo {
+        ProfileInfo { name: Some(name.into()), ..Default::default() }
+    }
+
     #[test]
-    fn first_run_creates_one_uuid_profile_with_its_json() {
+    fn first_run_creates_an_unnamed_profile_folder() {
         let root = temp_root("fresh");
         let p = Profiles::load(&root).unwrap();
         assert_eq!(p.profiles.len(), 1);
-        let id = &p.profiles[0].id;
-        assert!(Uuid::parse_str(id).is_ok());
-        assert!(Profiles::dir(&root, id).join(PROFILE_FILE).is_file());
-        assert_eq!(p.selected, *id);
+        assert_eq!(p.profiles[0].id, "Unnamed");
+        assert!(Profiles::dir(&root, "Unnamed").join(PROFILE_FILE).is_file());
+        assert_eq!(p.selected, "Unnamed");
         assert_eq!(Profiles::load(&root).unwrap(), p);
         std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn folders_take_the_lowest_free_number() {
+        let root = temp_root("numbering");
+        std::fs::create_dir_all(root.join(PROFILES_DIR)).unwrap();
+        let ids: Vec<String> = (0..3).map(|_| create(&root, ProfileInfo::default(), None).unwrap().id).collect();
+        assert_eq!(ids, ["Unnamed", "Unnamed (1)", "Unnamed (2)"]);
+        // A gap is filled first.
+        std::fs::remove_dir_all(Profiles::dir(&root, "Unnamed (1)")).unwrap();
+        assert_eq!(create(&root, ProfileInfo::default(), None).unwrap().id, "Unnamed (1)");
+        // Names work the same way, case-insensitively like Windows.
+        assert_eq!(create(&root, named("PvP"), None).unwrap().id, "PvP");
+        assert_eq!(create(&root, named("pvp"), None).unwrap().id, "pvp (1)");
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn names_become_safe_folder_names() {
+        assert_eq!(folder_base(None), "Unnamed");
+        assert_eq!(folder_base(Some("  ")), "Unnamed");
+        assert_eq!(folder_base(Some("PvP: 1.21/test?")), "PvP_ 1.21_test_");
+        assert_eq!(folder_base(Some("trailing dots...")), "trailing dots");
+        assert_eq!(folder_base(Some("con")), "_con");
+        assert_eq!(folder_base(Some("COM1.txt")), "_COM1.txt");
+        assert_eq!(folder_base(Some("Console")), "Console");
+        assert_eq!(unique_name("A", |n| n == "A" || n == "A (1)"), "A (2)");
     }
 
     #[test]
     fn selection_is_remembered() {
         let root = temp_root("select");
         let first = Profiles::load(&root).unwrap();
-        let second = create(&root, ProfileInfo { name: Some("PvP".into()), created: u64::MAX, ..Default::default() }, None).unwrap();
+        let second = create(&root, ProfileInfo { created: u64::MAX, ..named("PvP") }, None).unwrap();
         let mut p = Profiles::load(&root).unwrap();
         assert_eq!(p.profiles.len(), 2);
         assert_eq!(p.selected, first.selected);
         p.select(&root, &second.id).unwrap();
-        assert_eq!(Profiles::load(&root).unwrap().selected, second.id);
+        assert!(root.join(SETTINGS_FILE).is_file());
+        assert_eq!(Profiles::load(&root).unwrap().selected, "PvP");
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn misnamed_settings_file_is_moved_back() {
+        let root = temp_root("misnamed");
+        let first = Profiles::load(&root).unwrap();
+        create(&root, ProfileInfo { created: u64::MAX, ..named("PvP") }, None).unwrap();
+        std::fs::write(root.join(MISNAMED_SETTINGS_FILE), r#"{"selected_profile":"PvP"}"#).unwrap();
+        let p = Profiles::load(&root).unwrap();
+        assert_ne!(p.selected, first.selected);
+        assert_eq!(p.selected, "PvP");
+        assert!(!root.join(MISNAMED_SETTINGS_FILE).exists());
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn uuid_folders_are_renamed_after_their_profile() {
+        let root = temp_root("uuid");
+        let profiles = root.join(PROFILES_DIR);
+        let (a, b, c) = (
+            "0b1f6f0e-6a45-4c2e-9d3b-2f6d1b7a9c01".to_string(),
+            "6f2a9d4c-1e3b-4a8f-b7c5-0d9e8f7a6b02".to_string(),
+            "c3d4e5f6-a7b8-4c9d-8e0f-1a2b3c4d5e03".to_string(),
+        );
+        for (id, json, created) in [(&a, "", 1), (&b, r#""name":"PvP","#, 2), (&c, "", 3)] {
+            std::fs::create_dir_all(profiles.join(id).join("saves")).unwrap();
+            std::fs::write(profiles.join(id).join(PROFILE_FILE), format!("{{{json}\"created\":{created}}}")).unwrap();
+        }
+        std::fs::write(root.join(SETTINGS_FILE), format!(r#"{{"selected_profile":"{c}"}}"#)).unwrap();
+        let p = Profiles::load(&root).unwrap();
+        let ids: Vec<&str> = p.profiles.iter().map(|p| p.id.as_str()).collect();
+        assert_eq!(ids, ["Unnamed", "PvP", "Unnamed (1)"]);
+        assert_eq!(p.selected, "Unnamed (1)");
+        assert!(Profiles::dir(&root, "PvP").join("saves").is_dir());
         std::fs::remove_dir_all(&root).unwrap();
     }
 
@@ -240,11 +375,9 @@ mod tests {
         let p = Profiles::load(&root).unwrap();
         assert_eq!(p.profiles.len(), 2);
         assert!(!root.join("profiles.json").exists());
-        assert!(Profiles::dir(&root, &p.profiles[0].id).join("saves").is_dir());
-        let pvp = &p.profiles[1];
-        assert_eq!(pvp.info.name.as_deref(), Some("PvP"));
-        assert!(Profiles::dir(&root, &pvp.id).join("mods").is_dir());
-        assert_eq!(p.selected, pvp.id);
+        assert!(Profiles::dir(&root, "Unnamed").join("saves").is_dir());
+        assert!(Profiles::dir(&root, "PvP").join("mods").is_dir());
+        assert_eq!(p.selected, "PvP");
         std::fs::remove_dir_all(&root).unwrap();
     }
 
@@ -262,8 +395,8 @@ mod tests {
     fn ignores_folders_that_are_not_profiles() {
         let root = temp_root("junk");
         let p = Profiles::load(&root).unwrap();
-        std::fs::create_dir_all(root.join("profiles/not-a-uuid")).unwrap();
-        std::fs::create_dir_all(root.join(PROFILES_DIR).join(Uuid::new_v4().to_string())).unwrap(); // no profile.json
+        std::fs::create_dir_all(root.join("profiles/no-profile-json")).unwrap();
+        std::fs::write(root.join("profiles/a-file"), "x").unwrap();
         assert_eq!(Profiles::load(&root).unwrap().profiles, p.profiles);
         std::fs::remove_dir_all(&root).unwrap();
     }

@@ -2,8 +2,8 @@
 //! with the dropdown arrow morphing into a check mark on the selected option.
 
 use eframe::egui::{
-    Align2, Area, Color32, Context, CursorIcon, FontId, Id, Key, Order, Painter, Pos2, Rect, Role, Sense, Shadow, Stroke,
-    StrokeKind, TextureId, Vec2, WidgetInfo, emath, pos2, vec2,
+    Align2, Area, Color32, Context, CursorIcon, FontId, Id, Key, Order, Painter, Pos2, Rect, Role, Sense, Stroke,
+    TextureId, Vec2, WidgetInfo, emath, pos2, vec2,
 };
 
 use eframe::egui::text::{LayoutJob, TextWrapping};
@@ -30,7 +30,6 @@ pub enum Direction {
     Up,
 }
 
-const ANIMATION_SECONDS: f32 = 0.28;
 
 fn open_id(id: Id) -> Id {
     id.with("open")
@@ -50,7 +49,7 @@ pub fn set_open(ctx: &Context, id: Id, open: bool) {
 /// the option the user picked this frame, if any.
 pub fn show(ctx: &Context, id: Id, anchor: Rect, direction: Direction, items: &[Item], selected: usize) -> Option<usize> {
     let mut open = ctx.data(|d| d.get_temp::<bool>(open_id(id))).unwrap_or(false);
-    let t = ctx.animate_bool_with_time_and_easing(id.with("anim"), open, ANIMATION_SECONDS, emath::easing::cubic_out);
+    let t = ctx.animate_bool_with_time_and_easing(id.with("anim"), open, theme::EXPAND_SECONDS, emath::easing::cubic_out);
     let row_h = anchor.height();
     let rows = items.len().max(1);
     let expanded_top = match direction {
@@ -74,7 +73,7 @@ pub fn show(ctx: &Context, id: Id, anchor: Rect, direction: Direction, items: &[
         let scale = theme::press_scale(ctx, id, pressed);
         let center = panel.center();
         let sc = |r: Rect| theme::scale_about(r, center, scale);
-        paint_glass(&ui.painter().with_clip_rect(sc(panel).expand(24.0)), sc(panel), rounding, t);
+        theme::glass(&ui.painter().with_clip_rect(sc(panel).expand(24.0)), sc(panel), rounding, t, RESTING_SHADOW);
         let clip = ui.painter().with_clip_rect(sc(panel).shrink(1.0));
         if !open && (response.hovered() || response.is_pointer_button_down_on()) {
             let tint = if response.is_pointer_button_down_on() { theme::GLASS_PRESS } else { theme::GLASS_HOVER };
@@ -131,19 +130,6 @@ fn lerp_rect(a: Rect, b: Rect, t: f32) -> Rect {
     Rect::from_min_max(a.min.lerp(b.min, t), a.max.lerp(b.max, t))
 }
 
-fn paint_glass(painter: &Painter, rect: Rect, rounding: u8, t: f32) {
-    let shadow = Shadow {
-        offset: [0, (2.0 + 6.0 * t) as i8],
-        blur: (6.0 + 18.0 * t) as u8,
-        spread: 0,
-        color: Color32::from_black_alpha((50.0 + 70.0 * t) as u8),
-    };
-    painter.add(shadow.as_shape(rect, theme::radius(rounding)));
-    painter.rect_filled(rect, theme::radius(rounding), theme::PANEL);
-    painter.rect_filled(rect, theme::radius(rounding), theme::GLASS_TINT);
-    painter.rect_stroke(rect, theme::radius(rounding), Stroke::new(theme::STROKE_WIDTH, theme::GLASS_EDGE), StrokeKind::Inside);
-}
-
 fn paint_row(painter: &Painter, row: Rect, item: &Item, alpha: f32) {
     let pad = row.height() * 0.16;
     let text_x = match item.icon {
@@ -170,6 +156,8 @@ fn paint_row(painter: &Painter, row: Rect, item: &Item, alpha: f32) {
 
 /// Width reserved at the right of each row for the arrow / check mark.
 const INDICATOR_COLUMN: f32 = 30.0;
+/// Collapsed dropdowns keep a faint shadow so they read as raised controls.
+const RESTING_SHADOW: u8 = 50;
 
 fn indicator_center(row: Rect) -> Pos2 {
     pos2(row.max.x - row.height().min(37.0) * 0.5, row.center().y)
