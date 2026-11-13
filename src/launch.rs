@@ -18,7 +18,7 @@ use crate::meta::{self, AssetIndex, Library, RuntimeManifest, VersionJson};
 use crate::rules::{self, Env};
 
 pub const MC_VERSION: &str = "26.1.2";
-const PLAYER_NAME: &str = "Hermes";
+pub const PLAYER_NAME: &str = "Hermes";
 /// Java's `UUID.nameUUIDFromBytes("OfflinePlayer:Hermes")`, the id an offline server assigns.
 const PLAYER_UUID: &str = "b48f8beb-14f2-3d85-8bb8-f41038d06b08";
 const ASSET_BASE: &str = "https://resources.download.minecraft.net";
@@ -78,12 +78,38 @@ pub struct Launched {
     pub downloaded: usize,
 }
 
-pub fn launch(status: &(dyn Fn(String) + Sync)) -> Result<Launched> {
+/// Launch progress. The UI shows each step through a language key; the
+/// headless smoke test prints the `Display` form, which is developer-facing only.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Step {
+    Metadata,
+    Checking,
+    Downloading { done: usize, total: usize },
+    PreparingJava,
+    /// Non-fatal: the base class archive could not be built (JVM stderr attached).
+    JavaCacheSkipped(String),
+    Starting,
+}
+
+impl std::fmt::Display for Step {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Step::Metadata => write!(f, "Reading game metadata"),
+            Step::Checking => write!(f, "Checking game files"),
+            Step::Downloading { done, total } => write!(f, "Downloading {done}/{total} files"),
+            Step::PreparingJava => write!(f, "Preparing Java class cache (first launch only)"),
+            Step::JavaCacheSkipped(err) => write!(f, "Java class cache skipped: {err}"),
+            Step::Starting => write!(f, "Starting Minecraft"),
+        }
+    }
+}
+
+pub fn launch(status: &(dyn Fn(Step) + Sync)) -> Result<Launched> {
     let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
     runtime.block_on(launch_async(status))
 }
 
-async fn launch_async(status: &(dyn Fn(String) + Sync)) -> Result<Launched> {
+async fn launch_async(status: &(dyn Fn(Step) + Sync)) -> Result<Launched> {
     let start = Instant::now();
     let paths = Paths::new()?;
     let client = reqwest::Client::builder()
@@ -91,7 +117,7 @@ async fn launch_async(status: &(dyn Fn(String) + Sync)) -> Result<Launched> {
         .connect_timeout(Duration::from_secs(15))
         .build()?;
 
-    status("Reading game metadata".into());
+    status(Step::Metadata);
     let (vanilla, fabric) = futures::try_join!(
         meta::vanilla_version(&client, &paths.versions, MC_VERSION),
         meta::fabric_profile(&client, &paths.versions, MC_VERSION),
@@ -104,16 +130,16 @@ async fn launch_async(status: &(dyn Fn(String) + Sync)) -> Result<Launched> {
         meta::runtime_manifest(&client, &paths.runtime, &component),
     )?;
 
-    status("Checking game files".into());
+    status(Step::Checking);
     let env = Env::current();
     let tasks = file_tasks(&paths, &version, &assets, &runtime, &component, &env)?;
-    let downloaded = ensure_all(&client, tasks, status).await?;
+    let downloaded = ensure_all(&client, tasks, &|done, total| status(Step::Downloading { done, total })).await?;
 
     let bin = paths.runtime.join(&component).join("bin");
     let args = game_command(&paths, &version, &asset_ref.id, &env)?;
     ensure_base_cds(&paths, &bin, &args, status)?;
 
-    status("Starting Minecraft".into());
+    status(Step::Starting);
     let java = bin.join("javaw.exe");
     let child = spawn(&paths, &java, &args)?;
     Ok(Launched { child, elapsed: start.elapsed(), downloaded })
@@ -258,13 +284,13 @@ fn cds_layout_flags(args: &[String]) -> Vec<&str> {
 /// Mojang's Java runtime ships without a base CDS archive, so every JDK class
 /// would be parsed and verified on each launch. Generate the archive once with
 /// the game's own layout flags; a marker records which flags it matches.
-fn ensure_base_cds(paths: &Paths, java_bin: &Path, game_args: &[String], status: &(dyn Fn(String) + Sync)) -> Result<()> {
+fn ensure_base_cds(paths: &Paths, java_bin: &Path, game_args: &[String], status: &(dyn Fn(Step) + Sync)) -> Result<()> {
     let flags = cds_layout_flags(game_args).join(" ");
     let marker = java_bin.join("server").join("hermes-base-cds.flags");
     if std::fs::read_to_string(&marker).is_ok_and(|m| m == flags) {
         return Ok(());
     }
-    status("Preparing Java class cache (first launch only)".into());
+    status(Step::PreparingJava);
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
     let out = Command::new(java_bin.join("java.exe"))
         .args(cds_layout_flags(game_args))
@@ -277,7 +303,7 @@ fn ensure_base_cds(paths: &Paths, java_bin: &Path, game_args: &[String], status:
     if out.status.success() {
         std::fs::write(&marker, flags)?;
     } else {
-        status(format!("Java class cache skipped: {}", String::from_utf8_lossy(&out.stderr).trim()));
+        status(Step::JavaCacheSkipped(String::from_utf8_lossy(&out.stderr).trim().to_string()));
     }
     Ok(())
 }

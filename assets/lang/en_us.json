@@ -1,0 +1,12 @@
+{
+  "launcher.title": "",
+  "launcher.play": "",
+  "launcher.status.metadata": "",
+  "launcher.status.checking": "",
+  "launcher.status.downloading": "",
+  "launcher.status.preparing_java": "",
+  "launcher.status.starting": "",
+  "launcher.status.running": "",
+  "launcher.status.failed": "",
+  "launcher.status.failed.details": ""
+}

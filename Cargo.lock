@@ -1318,6 +1318,7 @@ dependencies = [
  "anyhow",
  "eframe",
  "futures",
+ "image",
  "reqwest",
  "serde",
  "serde_json",

@@ -86,11 +86,11 @@ fn missing(tasks: Vec<FileTask>) -> Vec<FileTask> {
 }
 
 /// Ensures every task's file exists, downloading the missing ones in parallel.
-/// Returns how many files were downloaded.
+/// `progress(done, total)` reports downloads. Returns how many files were downloaded.
 pub async fn ensure_all(
     client: &reqwest::Client,
     tasks: Vec<FileTask>,
-    status: &(dyn Fn(String) + Sync),
+    progress: &(dyn Fn(usize, usize) + Sync),
 ) -> Result<usize> {
     // Distinct asset names can share one content hash, i.e. one path.
     let mut seen = HashSet::new();
@@ -102,7 +102,7 @@ pub async fn ensure_all(
         return Ok(0);
     }
     let done = AtomicUsize::new(0);
-    status(format!("Downloading 0/{total} files"));
+    progress(0, total);
     futures::stream::iter(todo)
         .map(|task| {
             let done = &done;
@@ -111,7 +111,7 @@ pub async fn ensure_all(
                 write_atomic(&task.path, &bytes).await?;
                 let n = done.fetch_add(1, Ordering::Relaxed) + 1;
                 if n % 25 == 0 || n == total {
-                    status(format!("Downloading {n}/{total} files"));
+                    progress(n, total);
                 }
                 anyhow::Ok(())
             }
