@@ -1,7 +1,8 @@
 //! Installs Fabric Minecraft into the Hermes data folder and starts it.
 //!
 //! Warm-start path: all metadata is read from disk (no network), every file is
-//! checked by size on all cores, then the JVM is spawned with an AppCDS archive.
+//! checked by size on all cores, then the JVM is spawned using a base CDS
+//! archive of the JDK's own classes.
 
 use std::collections::HashMap;
 use std::fs::File;
@@ -33,7 +34,6 @@ pub struct Paths {
     instance: PathBuf,
     natives: PathBuf,
     logs: PathBuf,
-    cache: PathBuf,
 }
 
 impl Paths {
@@ -50,7 +50,6 @@ impl Paths {
             instance: root.join("instance"),
             natives: root.join("natives").join(MC_VERSION),
             logs: root.join("logs"),
-            cache: root.join("cache"),
             root,
         })
     }
@@ -233,11 +232,10 @@ fn game_command(paths: &Paths, version: &VersionJson, asset_index_id: &str, env:
         vars.insert("path", path_str(&paths.assets.join("log_configs").join(&log.file.id)));
     }
 
-    // AppCDS: the first run records loaded JDK and game classes into an archive;
-    // later runs map it instead of parsing and verifying those classes again.
-    let cds = paths.cache.join(format!("fabric-{MC_VERSION}.jsa"));
-    let mut args = vec![format!("-XX:SharedArchiveFile={}", path_str(&cds)), "-XX:+AutoCreateSharedArchive".into()];
-    args.extend(rules::expand(&version.arguments.default_user_jvm, env, &vars));
+    // No per-game AppCDS archive (AutoCreateSharedArchive): measured on 26.1.2 it
+    // saved ~0.5 s per launch (Minecraft's classes load through Fabric's Knot
+    // loader, which CDS can't archive) but recording it made one launch ~66 s slower.
+    let mut args = rules::expand(&version.arguments.default_user_jvm, env, &vars);
     args.extend(rules::expand(&version.arguments.jvm, env, &vars));
     if let Some(log) = log_config {
         args.push(rules::substitute(&log.argument, &vars));
@@ -247,18 +245,19 @@ fn game_command(paths: &Paths, version: &VersionJson, asset_index_id: &str, env:
     Ok(args)
 }
 
-/// The JVM flags that decide which base CDS archive the JVM looks for
-/// (GC, compressed oops, object header layout).
+/// The JVM flags the base CDS archive must match: GC, compressed oops and
+/// object header layout pick which archive file the JVM opens, and module
+/// options must be identical or the JVM disables optimized module handling.
 fn cds_layout_flags(args: &[String]) -> Vec<&str> {
     args.iter()
         .map(String::as_str)
-        .filter(|a| a.starts_with("-XX:+Use") || a.starts_with("-XX:-Use"))
+        .filter(|a| a.starts_with("-XX:+Use") || a.starts_with("-XX:-Use") || a.starts_with("--enable-native-access"))
         .collect()
 }
 
-/// Mojang's Java runtime ships without a base CDS archive, and the per-game
-/// archive (AutoCreateSharedArchive) only works on top of one. Generate it once
-/// with the game's own layout flags; a marker records which flags it matches.
+/// Mojang's Java runtime ships without a base CDS archive, so every JDK class
+/// would be parsed and verified on each launch. Generate the archive once with
+/// the game's own layout flags; a marker records which flags it matches.
 fn ensure_base_cds(paths: &Paths, java_bin: &Path, game_args: &[String], status: &(dyn Fn(String) + Sync)) -> Result<()> {
     let flags = cds_layout_flags(game_args).join(" ");
     let marker = java_bin.join("server").join("hermes-base-cds.flags");
@@ -288,7 +287,7 @@ fn path_str(p: &Path) -> String {
 }
 
 fn spawn(paths: &Paths, java: &Path, args: &[String]) -> Result<Child> {
-    for dir in [&paths.instance, &paths.natives, &paths.logs, &paths.cache] {
+    for dir in [&paths.instance, &paths.natives, &paths.logs] {
         std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
     }
     // javaw has no console; keep its output so startup crashes can be diagnosed.
@@ -309,10 +308,21 @@ mod tests {
 
     #[test]
     fn cds_flags_keep_only_layout_options() {
-        let args: Vec<String> = ["-Xmx4G", "-XX:+UseZGC", "-XX:+AlwaysPreTouch", "-XX:+UseCompactObjectHeaders", "-cp", "x"]
-            .map(String::from)
-            .to_vec();
-        assert_eq!(cds_layout_flags(&args), ["-XX:+UseZGC", "-XX:+UseCompactObjectHeaders"]);
+        let args: Vec<String> = [
+            "-Xmx4G",
+            "-XX:+UseZGC",
+            "-XX:+AlwaysPreTouch",
+            "-XX:+UseCompactObjectHeaders",
+            "--enable-native-access=ALL-UNNAMED",
+            "-cp",
+            "x",
+        ]
+        .map(String::from)
+        .to_vec();
+        assert_eq!(
+            cds_layout_flags(&args),
+            ["-XX:+UseZGC", "-XX:+UseCompactObjectHeaders", "--enable-native-access=ALL-UNNAMED"]
+        );
     }
 
     #[test]
