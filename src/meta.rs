@@ -238,11 +238,20 @@ async fn fetch_json<T: DeserializeOwned>(client: &reqwest::Client, url: &str) ->
     serde_json::from_slice(&bytes).with_context(|| format!("parsing {url}"))
 }
 
+/// Temp file beside `path`. Appends `.part` to the whole name: replacing the
+/// extension made `java.exe` and `java.dll` share `java.part`, so parallel
+/// downloads overwrote each other's temp file and one rename failed.
+fn temp_path(path: &Path) -> std::path::PathBuf {
+    let mut name = path.file_name().unwrap_or_default().to_os_string();
+    name.push(".part");
+    path.with_file_name(name)
+}
+
 pub async fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
     if let Some(dir) = path.parent() {
         tokio::fs::create_dir_all(dir).await?;
     }
-    let tmp = path.with_extension("part");
+    let tmp = temp_path(path);
     tokio::fs::write(&tmp, bytes).await?;
     tokio::fs::rename(&tmp, path)
         .await
@@ -355,6 +364,27 @@ mod tests {
 
     fn version(json: &str) -> VersionJson {
         serde_json::from_str(json).unwrap()
+    }
+
+    #[test]
+    fn temp_paths_are_unique_per_file() {
+        let exe = temp_path(Path::new("runtime/bin/java.exe"));
+        let dll = temp_path(Path::new("runtime/bin/java.dll"));
+        assert_ne!(exe, dll);
+        assert_eq!(exe, Path::new("runtime/bin/java.exe.part"));
+        assert_eq!(temp_path(Path::new("objects/ab/abcdef")), Path::new("objects/ab/abcdef.part"));
+    }
+
+    #[test]
+    fn concurrent_writes_of_same_stem_both_land() {
+        let dir = std::env::temp_dir().join(format!("hermes-atomic-{}", std::process::id()));
+        let rt = tokio::runtime::Builder::new_current_thread().build().unwrap();
+        let (exe, dll) = (dir.join("java.exe"), dir.join("java.dll"));
+        rt.block_on(async { futures::try_join!(write_atomic(&exe, b"exe"), write_atomic(&dll, b"dll")) })
+        .unwrap();
+        assert_eq!(std::fs::read(dir.join("java.exe")).unwrap(), b"exe");
+        assert_eq!(std::fs::read(dir.join("java.dll")).unwrap(), b"dll");
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

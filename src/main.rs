@@ -6,9 +6,11 @@ mod dropdown;
 mod lang;
 mod launch;
 mod meta;
+mod profiles;
 mod rules;
 mod theme;
 mod ui;
+mod window_shape;
 
 use std::process::ExitCode;
 use std::time::Instant;
@@ -28,13 +30,21 @@ fn main() -> ExitCode {
 }
 
 /// Debug builds only: `--screenshot <png>` saves the window after it settles and
-/// exits; `--open-dropdown` starts with the account dropdown open.
+/// exits; `--open-dropdown account|profile`, `--state downloading|checking|failed` and
+/// `--focus play|account` set up the state to capture.
 #[cfg(debug_assertions)]
 fn dev_options(args: &[String]) -> ui::DevOptions {
     ui::DevOptions {
         screenshot: args.iter().position(|a| a == "--screenshot").and_then(|i| args.get(i + 1)).map(Into::into),
-        open_dropdown: args.iter().any(|a| a == "--open-dropdown"),
+        open_dropdown: value_of(args, "--open-dropdown"),
+        state: value_of(args, "--state"),
+        focus: value_of(args, "--focus"),
     }
+}
+
+#[cfg(debug_assertions)]
+fn value_of(args: &[String], flag: &str) -> Option<String> {
+    args.iter().position(|a| a == flag).and_then(|i| args.get(i + 1)).cloned()
 }
 
 #[cfg(not(debug_assertions))]
@@ -42,12 +52,20 @@ fn dev_options(_: &[String]) -> ui::DevOptions {
     ui::DevOptions::default()
 }
 
-/// Smoke test: runs the same launch path as the Start button, prints timings,
-/// then waits for the game and fails if it exits with an error.
+/// Smoke test: launches the selected profile the same way the Play button does,
+/// prints timings, then waits for the game and fails if it exits with an error.
 fn headless() -> ExitCode {
     let start = Instant::now();
+    let game_dir = match launch::Paths::new().and_then(|p| Ok((profiles::Profiles::load(&p.root)?, p))) {
+        Ok((profiles, paths)) => profiles::Profiles::dir(&paths.root, &profiles.selected),
+        Err(e) => {
+            eprintln!("loading profiles failed: {e:#}");
+            return ExitCode::FAILURE;
+        }
+    };
+    println!("profile folder: {}", game_dir.display());
     let print = |s: launch::Step| println!("[{:>6} ms] {s}", start.elapsed().as_millis());
-    let mut launched = match launch::launch(&print) {
+    let mut launched = match launch::launch(&game_dir, &print) {
         Ok(l) => l,
         Err(e) => {
             eprintln!("launch failed: {e:#}");
@@ -63,7 +81,7 @@ fn headless() -> ExitCode {
     );
     if let Ok(paths) = launch::Paths::new() {
         println!("game output: {}", paths.game_output_log().display());
-        println!("game log:    {}", paths.root.join("instance").join("logs").join("latest.log").display());
+        println!("game log:    {}", game_dir.join("logs").join("latest.log").display());
     }
     match launched.child.wait() {
         Ok(status) if status.success() => {

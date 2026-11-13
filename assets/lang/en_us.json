@@ -8,5 +8,8 @@
   "launcher.status.starting": "",
   "launcher.status.running": "",
   "launcher.status.failed": "",
-  "launcher.status.failed.details": ""
+  "launcher.status.failed.details": "",
+  "launcher.profile.unnamed": "",
+  "launcher.window.close": "",
+  "launcher.window.minimise": ""
 }

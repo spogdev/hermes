@@ -24,14 +24,30 @@ const PLAYER_UUID: &str = "b48f8beb-14f2-3d85-8bb8-f41038d06b08";
 const ASSET_BASE: &str = "https://resources.download.minecraft.net";
 const MOJANG_LIBRARIES: &str = "https://libraries.minecraft.net/";
 
-/// Everything lives under `%APPDATA%\.hermes`, separate from the official launcher.
+/// Data folder name under `%APPDATA%`, separate from the official launcher.
+const DATA_DIR: &str = "hermes_client";
+/// Earlier builds used this name; its contents move to `DATA_DIR` once.
+const LEGACY_DATA_DIR: &str = ".hermes";
+
+/// `<appdata>/hermes_client`, created if missing. Moves the old `.hermes`
+/// folder there (same volume, so a rename) instead of downloading everything again.
+fn data_root(appdata: &Path) -> Result<PathBuf> {
+    let root = appdata.join(DATA_DIR);
+    let legacy = appdata.join(LEGACY_DATA_DIR);
+    if !root.exists() && legacy.is_dir() {
+        std::fs::rename(&legacy, &root).with_context(|| format!("moving {} to {}", legacy.display(), root.display()))?;
+    }
+    std::fs::create_dir_all(&root).with_context(|| format!("creating {}", root.display()))?;
+    Ok(root)
+}
+
+/// Everything lives under `%APPDATA%\hermes_client`.
 pub struct Paths {
     pub root: PathBuf,
     libraries: PathBuf,
     assets: PathBuf,
     versions: PathBuf,
     runtime: PathBuf,
-    instance: PathBuf,
     natives: PathBuf,
     logs: PathBuf,
 }
@@ -39,15 +55,12 @@ pub struct Paths {
 impl Paths {
     pub fn new() -> Result<Self> {
         let appdata = std::env::var_os("APPDATA").context("APPDATA is not set")?;
-        let root = PathBuf::from(appdata).join(".hermes");
-        std::fs::create_dir_all(&root).with_context(|| format!("creating {}", root.display()))?;
-        let root = real_path(&root)?;
+        let root = real_path(&data_root(Path::new(&appdata))?)?;
         Ok(Paths {
             libraries: root.join("libraries"),
             assets: root.join("assets"),
             versions: root.join("versions"),
             runtime: root.join("runtime"),
-            instance: root.join("instance"),
             natives: root.join("natives").join(MC_VERSION),
             logs: root.join("logs"),
             root,
@@ -104,12 +117,13 @@ impl std::fmt::Display for Step {
     }
 }
 
-pub fn launch(status: &(dyn Fn(Step) + Sync)) -> Result<Launched> {
+/// Installs what is missing and starts the game with `game_dir` as its game folder.
+pub fn launch(game_dir: &Path, status: &(dyn Fn(Step) + Sync)) -> Result<Launched> {
     let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
-    runtime.block_on(launch_async(status))
+    runtime.block_on(launch_async(game_dir, status))
 }
 
-async fn launch_async(status: &(dyn Fn(Step) + Sync)) -> Result<Launched> {
+async fn launch_async(game_dir: &Path, status: &(dyn Fn(Step) + Sync)) -> Result<Launched> {
     let start = Instant::now();
     let paths = Paths::new()?;
     let client = reqwest::Client::builder()
@@ -136,12 +150,12 @@ async fn launch_async(status: &(dyn Fn(Step) + Sync)) -> Result<Launched> {
     let downloaded = ensure_all(&client, tasks, &|done, total| status(Step::Downloading { done, total })).await?;
 
     let bin = paths.runtime.join(&component).join("bin");
-    let args = game_command(&paths, &version, &asset_ref.id, &env)?;
+    let args = game_command(&paths, game_dir, &version, &asset_ref.id, &env)?;
     ensure_base_cds(&paths, &bin, &args, status)?;
 
     status(Step::Starting);
     let java = bin.join("javaw.exe");
-    let child = spawn(&paths, &java, &args)?;
+    let child = spawn(&paths, game_dir, &java, &args)?;
     Ok(Launched { child, elapsed: start.elapsed(), downloaded })
 }
 
@@ -227,12 +241,14 @@ fn file_tasks(
 }
 
 /// Builds the arguments passed to `javaw.exe`: JVM options, main class, game options.
-fn game_command(paths: &Paths, version: &VersionJson, asset_index_id: &str, env: &Env) -> Result<Vec<String>> {
+fn game_command(paths: &Paths, game_dir: &Path, version: &VersionJson, asset_index_id: &str, env: &Env) -> Result<Vec<String>> {
+    // Each jar is resolved on its own: with folder redirection, files of one
+    // folder can live in different real locations (see `real_path`).
     let mut classpath = Vec::new();
     for lib in version.libraries.iter().filter(|l| rules::library_allowed(l, env)) {
-        classpath.push(path_str(&paths.libraries.join(library_file(lib)?.path)));
+        classpath.push(path_str(&real_path(&paths.libraries.join(library_file(lib)?.path))?));
     }
-    classpath.push(path_str(&client_jar(paths)));
+    classpath.push(path_str(&real_path(&client_jar(paths))?));
 
     let log_config = version.logging.as_ref().and_then(|l| l.client.as_ref());
     let mut vars: HashMap<&str, String> = HashMap::from([
@@ -244,7 +260,7 @@ fn game_command(paths: &Paths, version: &VersionJson, asset_index_id: &str, env:
         ("user_type", "msa".into()),
         ("version_name", version.id.clone()),
         ("version_type", version.kind.clone()),
-        ("game_directory", path_str(&paths.instance)),
+        ("game_directory", path_str(game_dir)),
         ("assets_root", path_str(&paths.assets)),
         ("assets_index_name", asset_index_id.into()),
         ("natives_directory", path_str(&paths.natives)),
@@ -312,15 +328,15 @@ fn path_str(p: &Path) -> String {
     p.to_string_lossy().into_owned()
 }
 
-fn spawn(paths: &Paths, java: &Path, args: &[String]) -> Result<Child> {
-    for dir in [&paths.instance, &paths.natives, &paths.logs] {
+fn spawn(paths: &Paths, game_dir: &Path, java: &Path, args: &[String]) -> Result<Child> {
+    for dir in [game_dir, paths.natives.as_path(), paths.logs.as_path()] {
         std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
     }
     // javaw has no console; keep its output so startup crashes can be diagnosed.
     let log = File::create(paths.game_output_log())?;
     Command::new(java)
         .args(args)
-        .current_dir(&paths.instance)
+        .current_dir(game_dir)
         .stdin(Stdio::null())
         .stdout(log.try_clone()?)
         .stderr(log)
@@ -354,7 +370,23 @@ mod tests {
     #[test]
     fn real_path_strips_verbatim_prefix() {
         let p = real_path(&std::env::temp_dir()).unwrap();
-        assert!(!p.to_string_lossy().starts_with(r"\?\"));
+        assert!(!p.to_string_lossy().starts_with(r"\\?\"));
         assert!(p.is_absolute());
+    }
+
+    #[test]
+    fn data_root_moves_legacy_folder_once() {
+        let appdata = std::env::temp_dir().join(format!("hermes-appdata-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&appdata);
+        std::fs::create_dir_all(appdata.join(LEGACY_DATA_DIR).join("assets")).unwrap();
+        let root = data_root(&appdata).unwrap();
+        assert_eq!(root, appdata.join(DATA_DIR));
+        assert!(root.join("assets").is_dir());
+        assert!(!appdata.join(LEGACY_DATA_DIR).exists());
+        // A later legacy folder is left alone once the new one exists.
+        std::fs::create_dir_all(appdata.join(LEGACY_DATA_DIR)).unwrap();
+        assert_eq!(data_root(&appdata).unwrap(), root);
+        assert!(appdata.join(LEGACY_DATA_DIR).exists());
+        std::fs::remove_dir_all(&appdata).unwrap();
     }
 }
