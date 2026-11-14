@@ -44,9 +44,9 @@ mod light {
 mod dark {
     use eframe::egui::Color32;
     // Cool slate instead of neutral grey, so the surfaces sit with the blue accents.
-    pub const BG: Color32 = Color32::from_rgb(0x10, 0x17, 0x1F);
-    pub const PANEL: Color32 = Color32::from_rgb(0x19, 0x23, 0x2F);
-    pub const OUTLINE: Color32 = Color32::from_rgb(0x2E, 0x3D, 0x4E);
+    pub const BG: Color32 = Color32::from_rgb(0x14, 0x1C, 0x26);
+    pub const PANEL: Color32 = Color32::from_rgb(0x1E, 0x29, 0x36);
+    pub const OUTLINE: Color32 = Color32::from_rgb(0x33, 0x43, 0x55);
     pub const TEXT: Color32 = Color32::from_rgb(0xEE, 0xF4, 0xFA);
     pub const PLAY: Color32 = Color32::from_rgb(0x5A, 0xC8, 0xFA);
     pub const PLAY_TEXT: Color32 = Color32::from_rgb(0x06, 0x22, 0x36);

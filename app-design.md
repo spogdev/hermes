@@ -15,7 +15,8 @@ behaviour detail they provide here. Reread before and during UI work.
   **14 px** (`theme::WINDOW_RADIUS`; v1 was 30, owner asked for less rounded). Windows clips the
   window to its shape, and it is drawn with transparency so the **corners are smooth**.
 - **Dark theme in cool slate tones** that sit with the blue accents (owner: the neutral greys
-  didn't fit): background `#10171F`, panels `#19232F`, dividers `#2E3D4E`, text `#EEF4FA`. A light
+  didn't fit): background `#141C26`, panels `#1E2936`, dividers `#334355`, text `#EEF4FA` (lightened
+  slightly on request from `#10171F` / `#19232F` / `#2E3D4E`). A light
   palette from an earlier trial is kept in `theme.rs` (switching is one line, `pub use light::*`).
 - **Outlines**: 2 px on every panel, control and dropdown, a **diamond-like gradient** from the
   Launch blue `#5AC8FA` to light blue `#D6F2FF` along the diagonal with faint facet bands
@@ -31,7 +32,7 @@ The v1 template (below) set the arrangement; the current build lays it out direc
 - **Sidebar**: full window height, **75 px** wide (50% wider on request), flush with the window's
   left, top and bottom edges. **Logo** (the owner's white wing) 48 px at its top.
 - **Top bar** (`BAR_HEIGHT` 50 px, thicker on request): right of the sidebar, draggable except over
-  its controls, with a **faint divider** (1 px, `#2E3D4E`) along its bottom edge. From the right:
+  its controls, with a **faint divider** (1 px, `#334355`) along its bottom edge. From the right:
   **close**, **minimise** (40 x 32 px buttons) and the **account switcher** (210 x 36 px, moved
   into the bar on request). No title.
 - **Content box**: fills the space between the sidebar, the top bar and the bottom controls
