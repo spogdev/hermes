@@ -31,7 +31,7 @@ fn main() -> ExitCode {
 }
 
 /// Debug builds only: `--screenshot <png>` saves the window after it settles and
-/// exits; `--open-dropdown account|profile`, `--state downloading|checking|running|failed`, `--open-sidebar` and
+/// exits; `--open-dropdown account`, `--state downloading|checking|running|failed`, `--open-sidebar` and
 /// `--focus play|account` set up the state to capture.
 #[cfg(debug_assertions)]
 fn dev_options(args: &[String]) -> ui::DevOptions {

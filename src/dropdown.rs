@@ -3,32 +3,19 @@
 
 use eframe::egui::{
     Align2, Area, Color32, Context, CursorIcon, Id, Key, Order, Painter, Pos2, Rect, Role, Sense, Stroke,
-    TextureId, Vec2, WidgetInfo, pos2, vec2,
+    Vec2, WidgetInfo, pos2, vec2,
 };
 
 use eframe::egui::text::{LayoutJob, TextWrapping};
-use eframe::epaint::RectShape;
 
 use crate::theme;
 
 pub struct Item {
     pub label: String,
-    pub icon: Option<Icon>,
+    /// Placeholder icon colour (the account head until skins are fetched).
+    pub icon: Option<Color32>,
 }
 
-#[derive(Clone, Copy)]
-pub enum Icon {
-    /// Placeholder square (e.g. the account head until skins are fetched).
-    Color(Color32),
-    Image(TextureId),
-}
-
-/// Which way the list grows from the collapsed pill.
-#[derive(Clone, Copy, PartialEq)]
-pub enum Direction {
-    Down,
-    Up,
-}
 
 
 fn open_id(id: Id) -> Id {
@@ -47,17 +34,15 @@ pub fn set_open(ctx: &Context, id: Id, open: bool) {
 
 /// Draws the dropdown over `anchor` (its collapsed size). Returns the index of
 /// the option the user picked this frame, if any.
-pub fn show(ctx: &Context, id: Id, anchor: Rect, direction: Direction, items: &[Item], selected: usize) -> Option<usize> {
+pub fn show(ctx: &Context, id: Id, anchor: Rect, items: &[Item], selected: usize) -> Option<usize> {
     let mut open = ctx.data(|d| d.get_temp::<bool>(open_id(id))).unwrap_or(false);
     // Opens and closes on the app's shared spring (like presses and the sidebar):
     // it overshoots slightly when opening; closing never shrinks below the pill.
     let t = theme::spring(ctx, id.with("expand"), if open { 1.0 } else { 0.0 }).0.max(0.0);
     let row_h = anchor.height();
     let rows = items.len().max(1);
-    let expanded_top = match direction {
-        Direction::Down => anchor.min.y,
-        Direction::Up => anchor.max.y - row_h * rows as f32,
-    };
+    // The list grows downward from the pill.
+    let expanded_top = anchor.min.y;
     let row_at = |k: usize| Rect::from_min_size(pos2(anchor.min.x, expanded_top + row_h * k as f32), anchor.size());
     let expanded = Rect::from_min_max(pos2(anchor.min.x, expanded_top), pos2(anchor.max.x, expanded_top + row_h * rows as f32));
     let panel = lerp_rect(anchor, expanded, t);
@@ -76,7 +61,7 @@ pub fn show(ctx: &Context, id: Id, anchor: Rect, direction: Direction, items: &[
         let center = panel.center();
         let sc = |r: Rect| theme::scale_about(r, center, scale);
         let highlight = theme::selected_amount(ctx, id, open || response.hovered() || response.has_focus());
-        theme::glass(&ui.painter().with_clip_rect(sc(panel).expand(24.0)), sc(panel), theme::radius(rounding), t, RESTING_SHADOW, highlight);
+        theme::glass(&ui.painter().with_clip_rect(sc(panel).expand(24.0)), sc(panel), theme::radius(rounding), t, RESTING_SHADOW, highlight, theme::Edge::Solid);
         let clip = ui.painter().with_clip_rect(sc(panel).shrink(1.0));
         if !open && (response.hovered() || response.is_pointer_button_down_on()) {
             let tint = if response.is_pointer_button_down_on() { theme::GLASS_PRESS } else { theme::GLASS_HOVER };
@@ -144,12 +129,7 @@ fn paint_row(painter: &Painter, row: Rect, item: &Item, alpha: f32) {
         None => row.min.x + pad * 2.4,
         Some(icon) => {
             let rect = Rect::from_min_size(row.min + vec2(pad * 1.6, pad), Vec2::splat(row.height() - 2.0 * pad));
-            let shape = match icon {
-                Icon::Color(color) => RectShape::filled(rect, theme::radius(theme::SMALL_RADIUS), color.gamma_multiply(alpha)),
-                Icon::Image(texture) => RectShape::filled(rect, theme::radius(theme::SMALL_RADIUS), Color32::WHITE.gamma_multiply(alpha))
-                    .with_texture(texture, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0))),
-            };
-            painter.add(shape);
+            painter.rect_filled(rect, theme::radius(theme::SMALL_RADIUS), icon.gamma_multiply(alpha));
             rect.max.x + pad * 1.4
         }
     };

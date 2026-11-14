@@ -11,14 +11,14 @@ use eframe::egui::{
     ViewportCommand, pos2, vec2,
 };
 
-use crate::dropdown::{self, Direction};
+use crate::dropdown;
 use crate::lang::{tr, tr_args};
 use crate::launch::{self, Step};
 use crate::profiles::Profiles;
 use crate::theme;
 use crate::{game_window, window_shape};
 
-/// Developer options for visual checks (`--screenshot <png>`, `--open-dropdown account|profile`,
+/// Developer options for visual checks (`--screenshot <png>`, `--open-dropdown account`,
 /// `--state downloading|checking|failed`, `--focus play|account`).
 #[derive(Default)]
 pub struct DevOptions {
@@ -72,13 +72,11 @@ struct HermesApp {
 }
 
 const ACCOUNT_DROPDOWN: &str = "account_dropdown";
-const PROFILE_DROPDOWN: &str = "profile_dropdown";
 
 impl HermesApp {
     fn new(ctx: &Context, dev: DevOptions) -> Self {
         match dev.open_dropdown.as_deref() {
             Some("account") => dropdown::set_open(ctx, Id::unique(ACCOUNT_DROPDOWN), true),
-            Some("profile") => dropdown::set_open(ctx, Id::unique(PROFILE_DROPDOWN), true),
             _ => {}
         }
         theme::apply_style(ctx);
@@ -132,27 +130,74 @@ impl HermesApp {
         }
     }
 
-    fn profile_dropdown(&mut self, ctx: &Context, rect: Rect) {
-        let items: Vec<dropdown::Item> = self
-            .profiles
-            .profiles
-            .iter()
-            .map(|p| dropdown::Item {
-                label: p.info.name.clone().unwrap_or_else(|| tr("profile.unnamed")),
-                icon: self.profile_icons.get(&p.id).map(|t| dropdown::Icon::Image(t.id())),
-            })
-            .collect();
-        let selected = self.profiles.selected_index();
-        // Creating profiles from the launcher comes later (owner will add it).
-        if let Some(i) = dropdown::show(ctx, Id::unique(PROFILE_DROPDOWN), rect, Direction::Up, &items, selected) {
-            let id = self.profiles.profiles[i].id.clone();
-            let saved = match &self.root {
-                Some(root) => self.profiles.select(root, &id),
-                None => Ok(()),
-            };
-            if let Err(e) = saved {
-                *self.phase.lock().unwrap() = Phase::Failed(format!("{e:#}"));
+    /// Selects the profile Launch starts and remembers it.
+    fn select_profile(&mut self, id: &str) {
+        let saved = match &self.root {
+            Some(root) => self.profiles.select(root, id),
+            None => Ok(()),
+        };
+        if let Err(e) = saved {
+            *self.phase.lock().unwrap() = Phase::Failed(format!("{e:#}"));
+        }
+    }
+
+    /// Home screen (the only screen so far). The right pane lists the pinned
+    /// profiles; clicking one selects it for Launch. The selected profile's row
+    /// has the bright selected outline. Profiles are pinned in their
+    /// `profile.json` (`"pinned": true`) until the launcher has a way to pin them.
+    fn home(&mut self, ui: &mut egui::Ui, pane: Rect) {
+        let clip = pane.shrink(theme::STROKE_WIDTH);
+        let painter = ui.painter().with_clip_rect(clip);
+        let width = pane.width() - 2.0 * theme::GAP;
+        let mut clicked = None;
+        let pinned = self.profiles.profiles.iter().filter(|p| p.info.pinned);
+        for (i, profile) in pinned.enumerate() {
+            let y = pane.min.y + theme::GAP + i as f32 * (theme::PINNED_ROW_HEIGHT + theme::PINNED_ROW_GAP);
+            let row = Rect::from_min_size(pos2(pane.min.x + theme::GAP, y), vec2(width, theme::PINNED_ROW_HEIGHT));
+            if row.min.y >= clip.max.y {
+                break;
             }
+            let label = profile.info.name.clone().unwrap_or_else(|| tr("profile.unnamed"));
+            let selected = profile.id == self.profiles.selected;
+            let id = Id::unique(("pinned_profile", &profile.id));
+            let response = ui.interact(row.intersect(clip), id, Sense::click()).on_hover_cursor(CursorIcon::PointingHand);
+            response.widget_info(|| egui::WidgetInfo::selected(egui::Role::ListBoxOption, true, selected, &label));
+            let pressed = response.is_pointer_button_down_on();
+            let row = theme::scale_about(row, row.center(), theme::press_scale(ui.ctx(), id, pressed));
+
+            // Same look as the dropdowns: glass tint, solid outline that turns
+            // the bright Launch blue for the selected profile.
+            let radius = theme::radius(theme::CONTROL_RADIUS);
+            painter.rect_filled(row, radius, theme::GLASS_TINT);
+            if response.hovered() {
+                painter.rect_filled(row, radius, if pressed { theme::GLASS_PRESS } else { theme::GLASS_HOVER });
+            }
+            let emphasis = theme::selected_amount(ui.ctx(), id, selected);
+            theme::selectable_outline(&painter, row, radius, emphasis, 0.0, theme::Edge::Solid);
+            if response.has_focus() {
+                theme::focus_ring(&painter, row, theme::CONTROL_RADIUS);
+            }
+
+            let pad = (row.height() - theme::PINNED_ICON_SIZE) / 2.0;
+            let mut text_x = row.min.x + pad + 4.0;
+            if let Some(texture) = self.profile_icons.get(&profile.id) {
+                let icon = Rect::from_min_size(pos2(row.min.x + pad + 4.0, row.min.y + pad), egui::Vec2::splat(theme::PINNED_ICON_SIZE));
+                let shape = egui::epaint::RectShape::filled(icon, theme::radius(theme::SMALL_RADIUS), egui::Color32::WHITE)
+                    .with_texture(texture.id(), Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)));
+                painter.add(shape);
+                text_x = icon.max.x + 12.0;
+            }
+            let mut job = egui::text::LayoutJob::simple_singleline(label, theme::text_font(16.0), theme::TEXT);
+            job.wrap = egui::text::TextWrapping::truncate_at_width((row.max.x - 16.0 - text_x).max(0.0));
+            let galley = painter.layout_job(job);
+            painter.galley(Align2::LEFT_CENTER.anchor_size(pos2(text_x, row.center().y), galley.size()).min, galley, theme::TEXT);
+
+            if response.clicked() {
+                clicked = Some(profile.id.clone());
+            }
+        }
+        if let Some(id) = clicked {
+            self.select_profile(&id);
         }
     }
 
@@ -263,13 +308,25 @@ impl HermesApp {
             || ctx
                 .pointer_hover_pos()
                 .is_some_and(|p| hover_area.contains(p) && !(open && theme::heading_out(hover_area, p, velocity)));
-        let open = if theme::spring_peek(ctx, id).settled { wants_open } else { open };
+        // Leaving the window closes it at once, even mid-opening (the one exception
+        // to finishing a move before reversing).
+        let left_window = !forced && ctx.input(|i| i.pointer.hover_pos().is_none());
+        let open = if left_window {
+            false
+        } else if theme::spring_peek(ctx, id).settled {
+            wants_open
+        } else {
+            open
+        };
         ctx.data_mut(|d| d.insert_temp(id, open));
 
-        let width = theme::spring_motion(ctx, id, if open { 1.0 } else { 0.0 });
-        let outset = theme::spring_motion(ctx, id.with("outset"), width.value);
-        let grow = theme::spring_motion(ctx, id.with("logo"), width.value);
-        let word = theme::spring_motion(ctx, id.with("word"), if open && width.value > 0.55 { 1.0 } else { 0.0 });
+        // The panel bounces a little (calmer than buttons); the logo and all text
+        // settle without overshoot, so nothing inside the sidebar wobbles.
+        let width = theme::spring_motion_with(ctx, id, if open { 1.0 } else { 0.0 }, theme::Bounce::Calm);
+        let outset = theme::spring_motion_with(ctx, id.with("outset"), width.value, theme::Bounce::Calm);
+        let grow = theme::spring_motion_with(ctx, id.with("logo"), width.value.clamp(0.0, 1.0), theme::Bounce::None);
+        let reveal_target = if open && width.value > 0.55 { 1.0 } else { 0.0 };
+        let word = theme::spring_motion_with(ctx, id.with("word"), reveal_target, theme::Bounce::None);
 
         // Opening overshoots slightly; closing never goes smaller than collapsed,
         // which would uncover the window edge it hides.
@@ -291,7 +348,7 @@ impl HermesApp {
             ui.allocate_rect(rect, Sense::hover());
             let painter = ui.painter();
             // Selected while open: the outline thickens and shimmers like a dropdown's.
-            theme::glass(&painter.with_clip_rect(rect.expand(24.0)), rect, corners, shown, 0, shown);
+            theme::glass(&painter.with_clip_rect(rect.expand(24.0)), rect, corners, shown, 0, shown, theme::Edge::Diamond);
             painter.image(self.logo.id(), logo, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), egui::Color32::WHITE);
             let reveal = word.value.clamp(0.0, 1.0);
             if reveal > 0.0 {
@@ -313,8 +370,9 @@ impl HermesApp {
             let home_y = rect.min.y + pad_top + theme::LOGO_SIZE + 18.0;
             let settings_y = rect.max.y - theme::NAV_INSET - theme::NAV_ROW_HEIGHT;
             let icons = &self.nav_icons;
-            nav_row(ui, rect, home_y, Id::unique("nav_home"), "sidebar.home", &icons.home, &icons.home_filled, word.value);
-            nav_row(ui, rect, settings_y, Id::unique("nav_settings"), "sidebar.settings", &icons.settings, &icons.settings_filled, word.value);
+            let row = |id, y, key, icon, filled| NavRow { id, y, label_key: key, icon, filled };
+            nav_row(ui, rect, open, word.value, row(Id::unique("nav_home"), home_y, "sidebar.home", &icons.home, &icons.home_filled));
+            nav_row(ui, rect, open, word.value, row(Id::unique("nav_settings"), settings_y, "sidebar.settings", &icons.settings, &icons.settings_filled));
         });
     }
 
@@ -359,9 +417,9 @@ impl HermesApp {
         let items: Vec<dropdown::Item> = self
             .accounts
             .iter()
-            .map(|name| dropdown::Item { label: name.clone(), icon: Some(dropdown::Icon::Color(theme::HEAD_PLACEHOLDER)) })
+            .map(|name| dropdown::Item { label: name.clone(), icon: Some(theme::HEAD_PLACEHOLDER) })
             .collect();
-        if let Some(i) = dropdown::show(&ctx, Id::unique(ACCOUNT_DROPDOWN), account, Direction::Down, &items, self.selected_account) {
+        if let Some(i) = dropdown::show(&ctx, Id::unique(ACCOUNT_DROPDOWN), account, &items, self.selected_account) {
             self.selected_account = i;
         }
     }
@@ -496,34 +554,54 @@ struct NavIcons {
     settings_filled: TextureHandle,
 }
 
-/// One sidebar navigation row at height `y` inside the sidebar `panel`: the icon
-/// (outline, filled while hovered), its label beside it (shown as the sidebar
-/// opens, on the same reveal as the wordmark, `reveal` 0..1+), and a hollow,
-/// semi-transparent rounded outline of fixed length around both.
-fn nav_row(ui: &mut egui::Ui, panel: Rect, y: f32, id: Id, label_key: &str, icon: &TextureHandle, filled: &TextureHandle, reveal: f32) {
+/// One sidebar navigation row.
+struct NavRow<'a> {
+    id: Id,
+    /// Top of the row inside the sidebar.
+    y: f32,
+    label_key: &'a str,
+    icon: &'a TextureHandle,
+    filled: &'a TextureHandle,
+}
+
+/// Draws a navigation row inside the sidebar `panel`: the icon (outline, filled
+/// while hovered), its label beside it (shown as the sidebar opens, on the same
+/// reveal as the wordmark, `reveal` 0..1+), and, only while hovered and the
+/// sidebar is `open` (not closed or closing), a frosted-glass selector of fixed
+/// length (the full width of the open sidebar) around both.
+fn nav_row(ui: &mut egui::Ui, panel: Rect, open: bool, reveal: f32, nav: NavRow) {
+    let NavRow { id, y, label_key, icon, filled } = nav;
     let row = Rect::from_min_size(pos2(panel.min.x + theme::NAV_INSET, y), vec2(theme::NAV_ROW_WIDTH, theme::NAV_ROW_HEIGHT));
     let clip = panel.shrink(theme::STROKE_WIDTH);
     let label = tr(label_key);
     // Only the part of the row inside the sidebar responds to the pointer.
-    let response = ui.interact(row.intersect(clip), id, Sense::click());
+    let visible = row.intersect(clip);
+    let response = ui.interact(visible, id, Sense::click()).on_hover_cursor(CursorIcon::PointingHand);
     response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, &label));
     let hovered = response.hovered();
     let painter = ui.painter().with_clip_rect(clip);
+    // Pressing shrinks the icon, label and selector together, like every other
+    // button, around the middle of the part that's visible.
+    let scale = theme::press_scale(ui.ctx(), id, response.is_pointer_button_down_on());
+    let origin = visible.center();
+    let shrink = |r: Rect| theme::scale_about(r, origin, scale);
 
-    let edge = theme::TEXT.gamma_multiply(if hovered { 0.40 } else { 0.22 });
-    painter.rect_stroke(row, theme::radius(theme::SMALL_RADIUS + 3), Stroke::new(1.5, edge), StrokeKind::Inside);
+    let selector = ui.ctx().animate_bool_with_time(id.with("selector"), hovered && open, 0.12);
+    theme::frosted(&painter, shrink(row), theme::SMALL_RADIUS + 3, selector);
 
     // The icon sits centred in the collapsed sidebar, so it never moves sideways.
     let center = pos2(panel.min.x + theme::SIDEBAR_WIDTH / 2.0, row.center().y);
     let icon_rect = Rect::from_center_size(center, egui::Vec2::splat(theme::NAV_ICON_SIZE));
     let texture = if hovered { filled } else { icon };
-    painter.image(texture.id(), icon_rect, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), egui::Color32::WHITE);
+    painter.image(texture.id(), shrink(icon_rect), Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), egui::Color32::WHITE);
 
     let shown = reveal.clamp(0.0, 1.0);
     if shown > 0.0 {
         let color = theme::TEXT.gamma_multiply(shown);
         let slide = 10.0 * (1.0 - reveal);
-        painter.text(pos2(icon_rect.max.x + 14.0 - slide, row.center().y), Align2::LEFT_CENTER, label, theme::text_font(16.0), color);
+        let anchor = pos2(icon_rect.max.x + 14.0 - slide, row.center().y);
+        let anchor = origin + (anchor - origin) * scale;
+        painter.text(anchor, Align2::LEFT_CENTER, label, theme::text_font(theme::NAV_TEXT_SIZE * scale), color);
     }
     if response.has_focus() {
         theme::focus_ring(&painter, row.intersect(clip), theme::SMALL_RADIUS + 3);
@@ -599,12 +677,13 @@ impl eframe::App for HermesApp {
 
         let painter = ui.painter().clone();
         painter.rect_filled(window, theme::radius(theme::WINDOW_RADIUS), theme::BG);
-        theme::outline(&painter, window, theme::WINDOW_RADIUS);
+        theme::outline(&painter, window, theme::WINDOW_RADIUS, theme::Edge::Diamond);
 
-        // Main content area: contents not designed yet.
+        // Main content pane: the home screen's pinned profiles.
         let body = theme::body_layout(window, sidebar);
         painter.rect_filled(body.content, theme::radius(theme::PANEL_RADIUS), theme::PANEL);
-        theme::outline(&painter, body.content, theme::PANEL_RADIUS);
+        theme::outline(&painter, body.content, theme::PANEL_RADIUS, theme::Edge::Solid);
+        self.home(ui, body.content);
 
         self.sidebar(&ctx, sidebar);
 
@@ -613,8 +692,6 @@ impl eframe::App for HermesApp {
         self.title_bar(ui, bar);
 
         self.play_button(ui, body.play);
-        // Profile selector: left of Play, same size, opens upward.
-        self.profile_dropdown(&ctx, body.profile);
 
         self.screenshot_tick(&ctx);
     }

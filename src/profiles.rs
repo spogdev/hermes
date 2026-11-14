@@ -2,7 +2,7 @@
 //! also its Minecraft game folder (mods, config, saves, options). The folder is
 //! named after the profile's name when it is created (`Unnamed` without one, and
 //! `Name (1)`, `Name (2)`, ... when taken). Inside it, `profile.json` holds the
-//! profile's details, and its icon image sits next to it. The selected profile is
+//! profile's details (name, icon, creation time, pinned), and its icon image sits next to it. The selected profile is
 //! remembered in `<data>/launcher.json`.
 //!
 //! Downloaded game files (libraries, assets, Java) are identical for every
@@ -36,6 +36,13 @@ pub struct ProfileInfo {
     /// Creation time (Unix milliseconds); orders the profile list.
     #[serde(default)]
     pub created: u64,
+    /// Pinned profiles are listed on the home screen.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub pinned: bool,
+}
+
+fn is_false(b: &bool) -> bool {
+    !*b
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -140,9 +147,6 @@ impl Profiles {
         write_settings(root, &Settings { selected_profile: Some(self.selected.clone()) })
     }
 
-    pub fn selected_index(&self) -> usize {
-        self.profiles.iter().position(|p| p.id == self.selected).unwrap_or(0)
-    }
 
     /// Path of the profile's icon, if it names a plain file inside its folder.
     pub fn icon_path(root: &Path, profile: &Profile) -> Option<PathBuf> {
@@ -230,7 +234,7 @@ fn migrate_legacy(root: &Path) -> Result<()> {
                 continue;
             }
             let old_dir = Profiles::dir(root, &old.id);
-            let info = ProfileInfo { name: old.name.clone(), icon: None, created: start + i as u64 };
+            let info = ProfileInfo { name: old.name.clone(), created: start + i as u64, ..Default::default() };
             let profile = create(root, info, old_dir.is_dir().then_some(old_dir.as_path()))?;
             if old.id == legacy.selected {
                 selected = Some(profile.id);
@@ -422,6 +426,16 @@ mod tests {
         std::fs::write(root.join("profiles/a-file"), "x").unwrap();
         assert_eq!(Profiles::load(&root).unwrap().profiles, p.profiles);
         std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn pinned_is_read_and_only_written_when_set() {
+        let pinned: ProfileInfo = serde_json::from_str(r#"{"name":"PvP","pinned":true,"created":1}"#).unwrap();
+        assert!(pinned.pinned);
+        let old: ProfileInfo = serde_json::from_str(r#"{"created":1}"#).unwrap();
+        assert!(!old.pinned);
+        assert!(!serde_json::to_string(&old).unwrap().contains("pinned"));
+        assert!(serde_json::to_string(&pinned).unwrap().contains(r#""pinned":true"#));
     }
 
     #[test]

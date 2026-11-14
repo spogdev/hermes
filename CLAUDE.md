@@ -25,7 +25,7 @@ Rust launcher (Windows 10/11) for Fabric Minecraft 26.1.2. UI is egui/eframe (gl
 - `cargo test`: unit tests.
 - `cargo run -- --headless`: runs the Start-button launch path without the window, prints
   timings, waits for the game, fails if it crashes. Game output: `%APPDATA%\HermesClient\logs\game-output.log`.
-- Visual check (debug builds): `cargo run -- --screenshot shot.png [--open-dropdown account|profile] [--state downloading|checking|running|failed] [--focus play|account] [--open-sidebar] [--screenshot-frame N]` renders the
+- Visual check (debug builds): `cargo run -- --screenshot shot.png [--open-dropdown account] [--state downloading|checking|running|failed] [--focus play|account] [--open-sidebar] [--screenshot-frame N]` renders the
   window, saves it as a PNG once animations settle, and exits.
 
 ## Code map
