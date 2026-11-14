@@ -15,6 +15,10 @@ Rust launcher (Windows 10/11) for Fabric Minecraft 26.1.2. UI is egui/eframe (gl
 
 ## Testing
 
+- **Never run test builds against the real data folder.** Debug runs (screenshots, `--headless`)
+  must set `HERMES_DATA_DIR` to a scratch folder; the Claude app's sandbox can't safely change
+  `%APPDATA%` (writes land in a sandbox copy, renames of real folders fail or hide them).
+
 - **Rebuild after every change, even small ones** (owner rule): `cargo build --release`, so
   `target\release\hermes.exe` is always current. If the exe is locked, close the running launcher first.
 
@@ -26,10 +30,11 @@ Rust launcher (Windows 10/11) for Fabric Minecraft 26.1.2. UI is egui/eframe (gl
 
 ## Code map
 
-- `theme.rs`: the shared design (colours, radii, template-to-window layout). Change looks here.
+- `theme.rs`: the shared design (colours, radii, template-to-window layout, font). Change looks here.
 - `lang.rs` + `assets/lang/*.json`: language keys. Add every new key to `en_us.json` with an
   empty value and list it in `app-design.md`.
 - `dropdown.rs`: the one dropdown component (glass, expand in place, arrow-to-check morph).
 - `ui.rs`: main window. `launch.rs`: install + start the game, reports progress as `Step`.
 - `profiles.rs`: profiles (`profiles/<name>/profile.json`, each folder is that profile's game folder). `window_shape.rs`: rounded window clip. `game_window.rs`: Stop (close the game window).
+- `build.rs`: embeds `assets/images/app_icon.ico` in the exe (needs the Windows SDK `rc.exe`).
 - The egui screenshot shows the app's own frame only; window-shape changes need a real screen check.

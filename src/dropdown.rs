@@ -2,8 +2,8 @@
 //! with the dropdown arrow morphing into a check mark on the selected option.
 
 use eframe::egui::{
-    Align2, Area, Color32, Context, CursorIcon, FontId, Id, Key, Order, Painter, Pos2, Rect, Role, Sense, Stroke,
-    TextureId, Vec2, WidgetInfo, emath, pos2, vec2,
+    Align2, Area, Color32, Context, CursorIcon, Id, Key, Order, Painter, Pos2, Rect, Role, Sense, Stroke,
+    TextureId, Vec2, WidgetInfo, pos2, vec2,
 };
 
 use eframe::egui::text::{LayoutJob, TextWrapping};
@@ -49,7 +49,9 @@ pub fn set_open(ctx: &Context, id: Id, open: bool) {
 /// the option the user picked this frame, if any.
 pub fn show(ctx: &Context, id: Id, anchor: Rect, direction: Direction, items: &[Item], selected: usize) -> Option<usize> {
     let mut open = ctx.data(|d| d.get_temp::<bool>(open_id(id))).unwrap_or(false);
-    let t = ctx.animate_bool_with_time_and_easing(id.with("anim"), open, theme::EXPAND_SECONDS, emath::easing::cubic_out);
+    // Opens and closes on the app's shared spring (like presses and the sidebar):
+    // it overshoots slightly when opening; closing never shrinks below the pill.
+    let t = theme::spring(ctx, id.with("expand"), if open { 1.0 } else { 0.0 }).0.max(0.0);
     let row_h = anchor.height();
     let rows = items.len().max(1);
     let expanded_top = match direction {
@@ -73,7 +75,8 @@ pub fn show(ctx: &Context, id: Id, anchor: Rect, direction: Direction, items: &[
         let scale = theme::press_scale(ctx, id, pressed);
         let center = panel.center();
         let sc = |r: Rect| theme::scale_about(r, center, scale);
-        theme::glass(&ui.painter().with_clip_rect(sc(panel).expand(24.0)), sc(panel), rounding, t, RESTING_SHADOW);
+        let highlight = theme::selected_amount(ctx, id, open || response.hovered() || response.has_focus());
+        theme::glass(&ui.painter().with_clip_rect(sc(panel).expand(24.0)), sc(panel), rounding, t, RESTING_SHADOW, highlight);
         let clip = ui.painter().with_clip_rect(sc(panel).shrink(1.0));
         if !open && (response.hovered() || response.is_pointer_button_down_on()) {
             let tint = if response.is_pointer_button_down_on() { theme::GLASS_PRESS } else { theme::GLASS_HOVER };
@@ -84,7 +87,7 @@ pub fn show(ctx: &Context, id: Id, anchor: Rect, direction: Direction, items: &[
         // row slides to its place in the list and the others fade in.
         for (k, item) in items.iter().enumerate() {
             let row = lerp_rect(anchor, row_at(k), t);
-            let alpha = if k == selected { 1.0 } else { t };
+            let alpha = if k == selected { 1.0 } else { t.min(1.0) };
             if alpha <= 0.01 {
                 continue;
             }
@@ -112,7 +115,7 @@ pub fn show(ctx: &Context, id: Id, anchor: Rect, direction: Direction, items: &[
         if !open && response.has_focus() {
             theme::focus_ring(ui.painter(), sc(panel), rounding);
         }
-        if !open && t < 0.01 && response.on_hover_cursor(CursorIcon::PointingHand).clicked() {
+        if !open && t <= 0.0 && response.on_hover_cursor(CursorIcon::PointingHand).clicked() {
             open = true;
         }
         let pressed_outside =
@@ -147,7 +150,7 @@ fn paint_row(painter: &Painter, row: Rect, item: &Item, alpha: f32) {
     };
     // Truncate with an ellipsis before the arrow/check column.
     let color = theme::TEXT.gamma_multiply(alpha);
-    let mut job = LayoutJob::simple_singleline(item.label.clone(), FontId::proportional((row.height() * 0.4).min(15.0)), color);
+    let mut job = LayoutJob::simple_singleline(item.label.clone(), theme::text_font((row.height() * 0.4).min(15.0)), color);
     job.wrap = TextWrapping::truncate_at_width((indicator_center(row).x - INDICATOR_COLUMN / 2.0 - text_x).max(0.0));
     let galley = painter.layout_job(job);
     let pos = Align2::LEFT_CENTER.anchor_size(pos2(text_x, row.center().y), galley.size()).min;

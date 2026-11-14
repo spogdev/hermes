@@ -36,11 +36,24 @@ fn data_root(appdata: &Path) -> Result<PathBuf> {
     let root = appdata.join(DATA_DIR);
     if !root.exists() {
         if let Some(legacy) = LEGACY_DATA_DIRS.iter().map(|n| appdata.join(n)).find(|p| p.is_dir()) {
-            std::fs::rename(&legacy, &root).with_context(|| format!("moving {} to {}", legacy.display(), root.display()))?;
+            // The move fails while something holds files open in the old folder (a
+            // running game or old launcher, antivirus). Keep using the old folder
+            // this time rather than failing or re-downloading; the move is retried
+            // on the next start.
+            if std::fs::rename(&legacy, &root).is_err() {
+                return Ok(legacy);
+            }
         }
     }
     std::fs::create_dir_all(&root).with_context(|| format!("creating {}", root.display()))?;
     Ok(root)
+}
+
+/// Debug builds only: `HERMES_DATA_DIR` points the launcher at a separate data
+/// folder, so test runs never touch (or migrate) the real one. Release builds
+/// always use `%APPDATA%\HermesClient`.
+fn dev_data_dir() -> Option<PathBuf> {
+    if cfg!(debug_assertions) { std::env::var_os("HERMES_DATA_DIR").map(PathBuf::from) } else { None }
 }
 
 /// Everything lives under `%APPDATA%\HermesClient`.
@@ -56,8 +69,16 @@ pub struct Paths {
 
 impl Paths {
     pub fn new() -> Result<Self> {
-        let appdata = std::env::var_os("APPDATA").context("APPDATA is not set")?;
-        let root = real_path(&data_root(Path::new(&appdata))?)?;
+        let root = match dev_data_dir() {
+            Some(dir) => {
+                std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
+                real_path(&dir)?
+            }
+            None => {
+                let appdata = std::env::var_os("APPDATA").context("APPDATA is not set")?;
+                real_path(&data_root(Path::new(&appdata))?)?
+            }
+        };
         Ok(Paths {
             libraries: root.join("libraries"),
             assets: root.join("assets"),
@@ -389,6 +410,23 @@ mod tests {
         // Once the new folder exists, older ones are never moved over it.
         assert_eq!(data_root(&appdata).unwrap(), root);
         assert!(appdata.join(".hermes").exists());
+        std::fs::remove_dir_all(&appdata).unwrap();
+    }
+
+    #[test]
+    fn data_root_keeps_using_old_folder_while_it_is_in_use() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let appdata = std::env::temp_dir().join(format!("hermes-appdata-locked-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&appdata);
+        let legacy = appdata.join("hermes_client");
+        std::fs::create_dir_all(&legacy).unwrap();
+        // Like a running game: a file held open without delete sharing blocks the move.
+        let held = std::fs::OpenOptions::new().write(true).create(true).share_mode(0).open(legacy.join("in-use.jar")).unwrap();
+        assert_eq!(data_root(&appdata).unwrap(), legacy);
+        assert!(!appdata.join(DATA_DIR).exists());
+        // Once it's free, the next start moves it.
+        drop(held);
+        assert_eq!(data_root(&appdata).unwrap(), appdata.join(DATA_DIR));
         std::fs::remove_dir_all(&appdata).unwrap();
     }
 }

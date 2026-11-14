@@ -215,7 +215,8 @@ struct LegacyProfile {
 fn migrate_legacy(root: &Path) -> Result<()> {
     let misnamed = root.join(MISNAMED_SETTINGS_FILE);
     if misnamed.is_file() {
-        std::fs::rename(&misnamed, root.join(SETTINGS_FILE))?;
+        // Best effort, like the folder renames below: retried next start if it fails.
+        let _ = std::fs::rename(&misnamed, root.join(SETTINGS_FILE));
     }
 
     let list = root.join("profiles.json");
@@ -250,7 +251,11 @@ fn migrate_legacy(root: &Path) -> Result<()> {
     for profile in by_uuid {
         let name = new_folder_name(root, profile.info.name.as_deref());
         let (from, to) = (Profiles::dir(root, &profile.id), Profiles::dir(root, &name));
-        std::fs::rename(&from, &to).with_context(|| format!("moving {} to {}", from.display(), to.display()))?;
+        // A running game holds files open in its profile folder, which blocks the
+        // rename; that profile keeps its old folder name and is retried next start.
+        if std::fs::rename(&from, &to).is_err() {
+            continue;
+        }
         if settings.selected_profile.as_deref() == Some(profile.id.as_str()) {
             settings.selected_profile = Some(name);
             write_settings(root, &settings)?;
@@ -359,6 +364,24 @@ mod tests {
         assert_eq!(ids, ["Unnamed", "PvP", "Unnamed (1)"]);
         assert_eq!(p.selected, "Unnamed (1)");
         assert!(Profiles::dir(&root, "PvP").join("saves").is_dir());
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn profile_in_use_keeps_its_folder_until_next_start() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let root = temp_root("uuid-in-use");
+        let id = "0b1f6f0e-6a45-4c2e-9d3b-2f6d1b7a9c01";
+        let dir = root.join(PROFILES_DIR).join(id);
+        std::fs::create_dir_all(dir.join("logs")).unwrap();
+        std::fs::write(dir.join(PROFILE_FILE), r#"{"created":1}"#).unwrap();
+        // Like a running game writing its log.
+        let held = std::fs::OpenOptions::new().write(true).create(true).share_mode(0).open(dir.join("logs/latest.log")).unwrap();
+        let p = Profiles::load(&root).unwrap();
+        assert_eq!(p.profiles.len(), 1);
+        assert_eq!(p.profiles[0].id, id);
+        drop(held);
+        assert_eq!(Profiles::load(&root).unwrap().profiles[0].id, "Unnamed");
         std::fs::remove_dir_all(&root).unwrap();
     }
 

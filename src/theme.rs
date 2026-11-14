@@ -1,8 +1,8 @@
 //! The one design every screen shares (see `app-design.md`). Change looks here, not per widget.
 
 use eframe::egui::{
-    Color32, Context, CornerRadius, FontData, FontDefinitions, FontFamily, FontId, Id, Painter, Pos2, Rect, Shadow, Stroke,
-    StrokeKind, Vec2, pos2, vec2,
+    Color32, Context, CornerRadius, FontData, FontDefinitions, FontFamily, FontId, Id, Painter, Pos2, Rect, Shadow,
+    Stroke, StrokeKind, Vec2, pos2, vec2,
 };
 use eframe::epaint::{CornerRadiusF32, PathShape, PathStroke, RoundedRect, tessellator::path};
 
@@ -43,10 +43,11 @@ mod light {
 #[allow(dead_code)]
 mod dark {
     use eframe::egui::Color32;
-    pub const BG: Color32 = Color32::from_rgb(0x1C, 0x1C, 0x1E);
-    pub const PANEL: Color32 = Color32::from_rgb(0x2C, 0x2C, 0x2E);
-    pub const OUTLINE: Color32 = Color32::from_rgb(0x4C, 0x4C, 0x50);
-    pub const TEXT: Color32 = Color32::from_rgb(0xF2, 0xF2, 0xF7);
+    // Cool slate instead of neutral grey, so the surfaces sit with the blue accents.
+    pub const BG: Color32 = Color32::from_rgb(0x10, 0x17, 0x1F);
+    pub const PANEL: Color32 = Color32::from_rgb(0x19, 0x23, 0x2F);
+    pub const OUTLINE: Color32 = Color32::from_rgb(0x2E, 0x3D, 0x4E);
+    pub const TEXT: Color32 = Color32::from_rgb(0xEE, 0xF4, 0xFA);
     pub const PLAY: Color32 = Color32::from_rgb(0x5A, 0xC8, 0xFA);
     pub const PLAY_TEXT: Color32 = Color32::from_rgb(0x06, 0x22, 0x36);
     pub const SHINE: Color32 = Color32::from_rgb(0xD6, 0xF2, 0xFF);
@@ -64,7 +65,7 @@ mod dark {
 
 pub const STROKE_WIDTH: f32 = 2.0;
 /// Line weight of every drawn icon (window buttons, dropdown arrow/check).
-pub const ICON_STROKE: f32 = 2.0;
+pub const ICON_STROKE: f32 = 2.5;
 pub const WINDOW_RADIUS: u8 = 14;
 /// Large surfaces: sidebar, main content panel.
 pub const PANEL_RADIUS: u8 = 12;
@@ -72,71 +73,143 @@ pub const PANEL_RADIUS: u8 = 12;
 pub const CONTROL_RADIUS: u8 = 14;
 /// Small controls (window buttons) and inner highlights.
 pub const SMALL_RADIUS: u8 = 9;
-pub const BAR_HEIGHT: f32 = 36.0;
-/// Width of the main window (the template frame), not counting the sidebar overhang.
+/// Height of the draggable top bar (window buttons and account switcher).
+pub const BAR_HEIGHT: f32 = 50.0;
+/// The window itself (not counting the room the sidebar may grow into).
 pub const WINDOW_WIDTH: f32 = 1200.0;
-/// How far the sidebar sticks out past the main window's top, bottom and left edges.
-pub const SIDEBAR_POP: f32 = 8.0;
+pub const WINDOW_HEIGHT: f32 = 707.0;
+/// Collapsed sidebar width. It sits inside the window, flush with its left,
+/// top and bottom edges.
+pub const SIDEBAR_WIDTH: f32 = 75.0;
+/// How far the hovered sidebar grows past the window's top, bottom and left edges.
+pub const SIDEBAR_OUTSET: f32 = 6.0;
+/// Transparent room kept around the window for that growth plus its spring overshoot.
+const SIDEBAR_ROOM: f32 = 8.0;
+/// Width the sidebar grows to while hovered.
+pub const SIDEBAR_EXPANDED_WIDTH: f32 = 310.0;
+/// Extra width allowed for the sidebar's spring overshoot when it opens.
+const SIDEBAR_BOUNCE_ROOM: f32 = 40.0;
+/// Logo size in the collapsed sidebar, and while it is expanded.
+pub const LOGO_SIZE: f32 = 48.0;
+pub const LOGO_SIZE_EXPANDED: f32 = 54.0;
+/// Spacing between the main areas (content box, bottom controls, edges).
+pub const GAP: f32 = 14.0;
+/// Launch button and profile dropdown size.
+pub const CONTROL_SIZE: Vec2 = vec2(230.0, 52.0);
+/// Account switcher in the top bar.
+pub const ACCOUNT_SIZE: Vec2 = vec2(210.0, 36.0);
+/// Every text size is scaled by this (owner: about 15% bigger).
+pub const TEXT_SCALE: f32 = 1.15;
 /// Fully transparent border around the painted outline. The window clip
 /// (`window_shape`) sits here, so its jagged per-pixel edge never touches a
 /// painted pixel and the anti-aliased outline blends smoothly with the desktop.
 pub const EDGE_MARGIN: f32 = 2.0;
 
-/// The owner's v1 template frame size; layout rects in `app-design.md` use these units.
-const TEMPLATE: Vec2 = vec2(1340.0, 749.0);
-
 fn main_size() -> Vec2 {
-    vec2(WINDOW_WIDTH, BAR_HEIGHT + TEMPLATE.y * WINDOW_WIDTH / TEMPLATE.x)
+    vec2(WINDOW_WIDTH, WINDOW_HEIGHT)
 }
 
-/// Fixed native window size: the main window plus the sidebar overhang.
+/// Fixed native window size: the window, the room the hovered sidebar grows
+/// into (left, top, bottom), and the transparent edge margin.
 pub fn window_size() -> Vec2 {
-    main_size() + vec2(SIDEBAR_POP, 2.0 * SIDEBAR_POP) + Vec2::splat(2.0 * EDGE_MARGIN)
+    main_size() + vec2(SIDEBAR_ROOM, 2.0 * SIDEBAR_ROOM) + Vec2::splat(2.0 * EDGE_MARGIN)
 }
 
-/// Splits the native window area into the main window and the sidebar, which
-/// overhangs the main window on the top, bottom and left.
+/// Splits the native window area into the window and its collapsed sidebar,
+/// which runs down the window's left edge.
 pub fn frame_layout(area: Rect) -> (Rect, Rect) {
     let area = area.shrink(EDGE_MARGIN);
-    let main = Rect::from_min_max(area.min + Vec2::splat(SIDEBAR_POP), area.max - vec2(0.0, SIDEBAR_POP));
-    let sidebar_right = place(main, 66.0, 0.0, 0.0, 0.0).min.x;
-    (main, Rect::from_min_max(area.min, pos2(sidebar_right, area.max.y)))
+    let main = Rect::from_min_max(area.min + Vec2::splat(SIDEBAR_ROOM), area.max - vec2(0.0, SIDEBAR_ROOM));
+    (main, Rect::from_min_max(main.min, pos2(main.min.x + SIDEBAR_WIDTH, main.max.y)))
 }
 
-/// Maps a rect given in template units onto `body` (the window area below the bar).
-pub fn place(body: Rect, x: f32, y: f32, w: f32, h: f32) -> Rect {
-    let s = body.width() / TEMPLATE.x;
-    Rect::from_min_size(pos2(body.min.x + x * s, body.min.y + y * s), vec2(w * s, h * s))
+/// The sidebar at expansion `t` (0 collapsed, 1 expanded; the spring may pass 1):
+/// it widens over the window and grows past its top, bottom and left edges.
+pub fn sidebar_rect(collapsed: Rect, t: f32) -> Rect {
+    let out = SIDEBAR_OUTSET * t;
+    let width = SIDEBAR_WIDTH + (SIDEBAR_EXPANDED_WIDTH - SIDEBAR_WIDTH) * t;
+    Rect::from_min_max(collapsed.min - Vec2::splat(out), pos2(collapsed.min.x + width, collapsed.max.y + out))
+}
+
+/// Everything the sidebar can cover, overshoot included (for the window clip).
+pub fn sidebar_reach(collapsed: Rect) -> Rect {
+    let full = sidebar_rect(collapsed, 1.0);
+    Rect::from_min_max(
+        collapsed.min - Vec2::splat(SIDEBAR_ROOM),
+        pos2(full.max.x + SIDEBAR_BOUNCE_ROOM, collapsed.max.y + SIDEBAR_ROOM),
+    )
+}
+
+/// Areas of the window below the top bar.
+pub struct Body {
+    pub content: Rect,
+    pub profile: Rect,
+    pub play: Rect,
+}
+
+/// Lays out the window body: Launch bottom-right, the profile dropdown to its
+/// left, and the content box filling the rest between the sidebar and the edges.
+pub fn body_layout(window: Rect, sidebar: Rect) -> Body {
+    let play = Rect::from_min_size(window.max - CONTROL_SIZE - Vec2::splat(GAP), CONTROL_SIZE);
+    let profile = play.translate(vec2(-(CONTROL_SIZE.x + GAP), 0.0));
+    let content = Rect::from_min_max(
+        pos2(sidebar.max.x + GAP, window.min.y + BAR_HEIGHT + GAP),
+        pos2(window.max.x - GAP, play.min.y - GAP),
+    );
+    Body { content, profile, play }
 }
 
 pub fn radius(r: u8) -> CornerRadius {
     CornerRadius::same(r)
 }
 
-/// Length of every expand/collapse animation (dropdowns, sidebar).
-pub const EXPAND_SECONDS: f32 = 0.28;
-
 /// The app's outline: a 2 px edge that shifts from the Play blue to `SHINE` along
 /// the diagonal, with faint facet bands, so it catches light like a cut diamond.
 pub fn outline(painter: &Painter, rect: Rect, r: u8) {
-    let half = STROKE_WIDTH / 2.0;
+    selectable_outline(painter, rect, r, 0.0, 0.0);
+}
+
+/// Extra outline width when an element is fully selected (hovered, focused or open).
+const SELECTED_EXTRA_WIDTH: f32 = 1.0;
+/// How fast the light band travels along a selected outline (laps per second).
+const SHIMMER_SPEED: f32 = 0.35;
+
+/// The diamond outline of an element that can be selected. `selected` (0..1,
+/// animated by the caller) thickens it slightly and adds a soft band of light
+/// that travels along the gradient; `time` is the UI clock in seconds.
+pub fn selectable_outline(painter: &Painter, rect: Rect, r: u8, selected: f32, time: f32) {
+    let width = STROKE_WIDTH + SELECTED_EXTRA_WIDTH * selected;
+    let half = width / 2.0;
     let mut points = Vec::new();
     // The path runs down the middle of the stroke, so its radius is reduced to stay concentric.
     path::rounded_rectangle(&mut points, RoundedRect::new(rect.shrink(half), CornerRadiusF32::same((r as f32 - half).max(0.0))));
-    painter.add(PathShape::closed_line(points, PathStroke::new_uv(STROKE_WIDTH, |bounds, p| diamond(bounds, p))));
+    let phase = (time * SHIMMER_SPEED).fract();
+    painter.add(PathShape::closed_line(points, PathStroke::new_uv(width, move |bounds, p| diamond(bounds, p, selected, phase))));
+    if selected > 0.0 {
+        painter.ctx().request_repaint();
+    }
 }
 
-fn diamond(bounds: Rect, p: Pos2) -> Color32 {
+fn diamond(bounds: Rect, p: Pos2, selected: f32, phase: f32) -> Color32 {
     let u = ((p.x - bounds.min.x) / bounds.width().max(1.0) + (p.y - bounds.min.y) / bounds.height().max(1.0)) / 2.0;
     // Main sweep blue -> light, plus a faint ripple for the facet look.
     let t = (u + 0.08 * (u * std::f32::consts::TAU * 3.0).sin()).clamp(0.0, 1.0);
-    PLAY.lerp_to_gamma(SHINE, t)
+    let base = PLAY.lerp_to_gamma(SHINE, t);
+    if selected <= 0.0 {
+        return base;
+    }
+    // A soft highlight band that wraps around the diagonal as `phase` advances.
+    let d = (u - phase).rem_euclid(1.0);
+    let d = d.min(1.0 - d);
+    let band = (-(d / 0.14).powi(2)).exp();
+    base.lerp_to_gamma(Color32::WHITE, 0.55 * band * selected)
 }
 
 /// Glass surface used by everything that expands (dropdowns, sidebar): panel fill,
 /// a white tint, the diamond outline, and a shadow that grows as it opens
-/// (`t` 0 = collapsed, 1 = open; `resting_shadow` = shadow alpha when collapsed).
-pub fn glass(painter: &Painter, rect: Rect, r: u8, t: f32, resting_shadow: u8) {
+/// (`t` 0 = collapsed, 1 = open; `resting_shadow` = shadow alpha when collapsed;
+/// `selected` 0..1 drives the selected outline, see `selectable_outline`).
+pub fn glass(painter: &Painter, rect: Rect, r: u8, t: f32, resting_shadow: u8, selected: f32) {
     let alpha = resting_shadow as f32 + (120.0 - resting_shadow as f32) * t;
     if alpha >= 1.0 {
         let shadow = Shadow {
@@ -149,16 +222,13 @@ pub fn glass(painter: &Painter, rect: Rect, r: u8, t: f32, resting_shadow: u8) {
     }
     painter.rect_filled(rect, radius(r), PANEL);
     painter.rect_filled(rect, radius(r), GLASS_TINT);
-    outline(painter, rect, r);
+    selectable_outline(painter, rect, r, selected, painter.ctx().input(|i| i.time) as f32);
 }
 
-/// Width the sidebar grows to while hovered.
-pub const SIDEBAR_EXPANDED_WIDTH: f32 = 220.0;
-/// Extra width the window clip leaves for the sidebar's spring overshoot.
-pub const SIDEBAR_BOUNCE_ROOM: f32 = 32.0;
-
-pub fn sidebar_expanded(collapsed: Rect) -> Rect {
-    Rect::from_min_size(collapsed.min, vec2(SIDEBAR_EXPANDED_WIDTH.max(collapsed.width()), collapsed.height()))
+/// Animated 0..1 "selected" amount for an element (hovered, focused or open), so
+/// the outline eases into and out of its selected look.
+pub fn selected_amount(ctx: &Context, id: Id, selected: bool) -> f32 {
+    ctx.animate_bool_with_time(id.with("selected"), selected, 0.15)
 }
 
 /// How far a pressed control shrinks (fraction of its size).
@@ -223,27 +293,33 @@ pub fn focus_ring(painter: &Painter, rect: Rect, r: u8) {
     painter.rect_stroke(rect.expand(3.0), radius(r.saturating_add(3)), Stroke::new(2.0, FOCUS), StrokeKind::Outside);
 }
 
-/// Font family of the "Hermes" wordmark: Amsterdam Four when the font file was
-/// present at build time (see build.rs), the regular UI font otherwise.
+const WORDMARK_FAMILY: &str = "wordmark";
+
+/// Fonts (both SIL Open Font License, licences in `assets/fonts/`): Afacad Flux
+/// Bold for all text, and Pacifico only for the "Hermes" wordmark.
+pub fn install_fonts(ctx: &Context) {
+    let mut fonts = FontDefinitions::empty();
+    let text = "afacad_flux_bold".to_string();
+    let wordmark = "pacifico".to_string();
+    let bold = FontData::from_static(include_bytes!("../assets/fonts/AfacadFlux-Bold.ttf"));
+    let pacifico = FontData::from_static(include_bytes!("../assets/fonts/Pacifico-Regular.ttf"));
+    fonts.font_data.insert(text.clone(), std::sync::Arc::new(bold));
+    fonts.font_data.insert(wordmark.clone(), std::sync::Arc::new(pacifico));
+    // egui expects both built-in families to exist; the app has no monospace text.
+    fonts.families.insert(FontFamily::Proportional, vec![text.clone()]);
+    fonts.families.insert(FontFamily::Monospace, vec![text.clone()]);
+    fonts.families.insert(FontFamily::Name(WORDMARK_FAMILY.into()), vec![wordmark, text]);
+    ctx.set_fonts(fonts);
+}
+
+/// Pacifico, for the "Hermes" wordmark only.
 pub fn wordmark_font(size: f32) -> FontId {
     FontId::new(size, FontFamily::Name(WORDMARK_FAMILY.into()))
 }
 
-const WORDMARK_FAMILY: &str = "wordmark";
-
-pub fn install_fonts(ctx: &Context) {
-    let mut fonts = FontDefinitions::default();
-    let family = FontFamily::Name(WORDMARK_FAMILY.into());
-    #[cfg(wordmark_font)]
-    {
-        let data = FontData::from_static(include_bytes!("../assets/fonts/amsterdam_four.ttf"));
-        fonts.font_data.insert("amsterdam_four".into(), std::sync::Arc::new(data));
-        fonts.families.insert(family.clone(), vec!["amsterdam_four".into()]);
-    }
-    // Glyphs the wordmark font lacks (or the whole font, if absent) come from the UI font.
-    let fallback = fonts.families.get(&FontFamily::Proportional).cloned().unwrap_or_default();
-    fonts.families.entry(family).or_default().extend(fallback);
-    ctx.set_fonts(fonts);
+/// The app's text font at `size` before the global text scale.
+pub fn text_font(size: f32) -> FontId {
+    FontId::proportional(size * TEXT_SCALE)
 }
 
 /// Styles egui's own surfaces (tooltips, popups) with the app palette.
@@ -257,6 +333,10 @@ pub fn apply_style(ctx: &Context) {
         v.menu_corner_radius = radius(CONTROL_RADIUS);
         v.popup_shadow = Shadow { offset: [0, 4], blur: 14, spread: 0, color: Color32::from_black_alpha(90) };
         v.override_text_color = Some(TEXT);
+        // Tooltips and any egui-drawn text follow the same scale as the app's own text.
+        for font in style.text_styles.values_mut() {
+            font.size *= TEXT_SCALE;
+        }
     });
 }
 
@@ -294,21 +374,33 @@ mod tests {
     }
 
     #[test]
-    fn template_scales_to_body() {
-        let body = Rect::from_min_size(pos2(0.0, BAR_HEIGHT), vec2(WINDOW_WIDTH, main_size().y - BAR_HEIGHT));
-        let full = place(body, 0.0, 0.0, TEMPLATE.x, TEMPLATE.y);
-        assert!((full.max.x - body.max.x).abs() < 0.01);
-        assert!((full.max.y - body.max.y).abs() < 0.01);
-    }
-
-    #[test]
-    fn sidebar_overhangs_main_window() {
+    fn sidebar_sits_in_the_window_and_grows_out_of_it() {
         let area = Rect::from_min_size(pos2(0.0, 0.0), window_size());
         let (main, sidebar) = frame_layout(area);
         assert_eq!(main.size(), main_size());
-        assert_eq!(sidebar.min, area.min + Vec2::splat(EDGE_MARGIN));
-        assert_eq!(sidebar.max.y, area.max.y - EDGE_MARGIN);
-        assert!(sidebar.min.y < main.min.y && sidebar.max.y > main.max.y && sidebar.min.x < main.min.x);
-        assert!(sidebar.max.x > main.min.x);
+        assert!(main.contains_rect(sidebar));
+        assert_eq!((sidebar.min, sidebar.max.y, sidebar.width()), (main.min, main.max.y, SIDEBAR_WIDTH));
+        // Expanded, it passes the window's top, bottom and left edges by the outset...
+        let open = sidebar_rect(sidebar, 1.0);
+        assert_eq!(open.min, main.min - Vec2::splat(SIDEBAR_OUTSET));
+        assert_eq!(open.max.y, main.max.y + SIDEBAR_OUTSET);
+        // ...and even with spring overshoot it stays inside the clip and the native window.
+        let reach = sidebar_reach(sidebar);
+        assert!(reach.contains_rect(sidebar_rect(sidebar, 1.15)));
+        assert!(area.contains_rect(reach.shrink(0.01)));
+    }
+
+    #[test]
+    fn body_areas_fit_without_overlapping() {
+        let area = Rect::from_min_size(pos2(0.0, 0.0), window_size());
+        let (main, sidebar) = frame_layout(area);
+        let body = body_layout(main, sidebar);
+        for r in [body.content, body.profile, body.play] {
+            assert!(main.contains_rect(r));
+            assert!(!r.intersects(sidebar));
+        }
+        assert!(!body.content.intersects(body.play) && !body.content.intersects(body.profile));
+        assert!(!body.profile.intersects(body.play));
+        assert!(body.content.min.y >= main.min.y + BAR_HEIGHT);
     }
 }

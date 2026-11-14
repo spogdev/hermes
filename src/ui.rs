@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use eframe::egui::{
-    self, Align2, Context, CursorIcon, FontId, Id, Rect, Sense, Stroke, StrokeKind, TextureHandle, TextureOptions,
+    self, Align2, Context, CursorIcon, Id, Rect, Sense, Stroke, StrokeKind, TextureHandle, TextureOptions,
     ViewportCommand, pos2, vec2,
 };
 
@@ -15,7 +15,7 @@ use crate::dropdown::{self, Direction};
 use crate::lang::{tr, tr_args};
 use crate::launch::{self, Step};
 use crate::profiles::Profiles;
-use crate::theme::{self, place};
+use crate::theme;
 use crate::{game_window, window_shape};
 
 /// Developer options for visual checks (`--screenshot <png>`, `--open-dropdown account|profile`,
@@ -108,7 +108,7 @@ impl HermesApp {
             focus,
             profile_icons,
             phase: Arc::new(Mutex::new(phase)),
-            logo: load_png(ctx, "logo", include_bytes!("../assets/images/logo_placeholder.png")),
+            logo: load_png(ctx, "logo", include_bytes!("../assets/images/logo.png")),
             // Offline mode has one account; Microsoft accounts will fill this list.
             accounts: vec![launch::PLAYER_NAME.to_string()],
             selected_account: 0,
@@ -145,9 +145,10 @@ impl HermesApp {
         }
     }
 
-    /// Clips the window to the outline of the main window plus the overhanging
-    /// sidebar (rebuilt if the physical size changes, e.g. DPI) and returns the
-    /// visible window area to lay the UI out in.
+    /// Clips the window to the window outline plus everything the hovered sidebar
+    /// can grow into (rebuilt if the physical size changes, e.g. DPI) and returns
+    /// the visible window area to lay the UI out in. Areas the collapsed sidebar
+    /// doesn't cover are fully transparent.
     fn clip_window(&mut self, ctx: &Context, frame: &eframe::Frame) -> Rect {
         let ppp = ctx.pixels_per_point();
         let content = ctx.content_rect();
@@ -166,12 +167,7 @@ impl HermesApp {
             self.visible = window_shape::clip(frame, |v| {
                 let area = Rect::from_min_size(content.min, vec2(v.width as f32, v.height as f32) / ppp);
                 let (main, sidebar) = theme::frame_layout(area);
-                // The expanded sidebar is included so it can grow over the window; while
-                // collapsed that area is fully transparent.
-                vec![
-                    to_px(main.expand(theme::EDGE_MARGIN)),
-                    to_px(theme::sidebar_expanded(sidebar).expand(theme::EDGE_MARGIN) + egui::Margin { right: theme::SIDEBAR_BOUNCE_ROOM as i8, ..Default::default() }),
-                ]
+                vec![to_px(main.expand(theme::EDGE_MARGIN)), to_px(theme::sidebar_reach(sidebar).expand(theme::EDGE_MARGIN))]
             })
             .map(|v| vec2(v.width as f32, v.height as f32) / ppp);
             self.region_size = Some(size);
@@ -229,12 +225,13 @@ impl HermesApp {
         }
     }
 
-    /// Full-height sidebar that overhangs the window and, while hovered, expands
-    /// over it like a dropdown (same glass, outline and timing). Its contents are
-    /// not designed yet; for now it carries the logo.
-    fn sidebar(&self, ctx: &Context, collapsed: Rect, logo: Rect) {
+    /// Full-height sidebar inside the window. While hovered it grows, on the same
+    /// spring as buttons and dropdowns: it widens over the window and slightly past
+    /// the window's top, bottom and left edges, the logo grows a little, and the
+    /// "Hermes" wordmark appears beside it. Other contents aren't designed yet.
+    fn sidebar(&self, ctx: &Context, collapsed: Rect) {
         let id = Id::unique("sidebar");
-        let expanded = theme::sidebar_expanded(collapsed);
+        let expanded = theme::sidebar_rect(collapsed, 1.0);
         // `open` is the direction the sidebar is moving in. It stays open while the
         // pointer is anywhere over the expanded panel, and it only changes direction
         // once a move has finished: opening always fully opens, closing fully closes.
@@ -246,49 +243,80 @@ impl HermesApp {
         let open = if settled { wants_open } else { open };
         ctx.data_mut(|d| d.insert_temp(id, open));
         let (progress, _) = theme::spring(ctx, id, if open { 1.0 } else { 0.0 });
-        // Opening overshoots past full width; closing never goes narrower than
-        // collapsed, which would uncover the window edge it hides.
+        // Opening overshoots slightly; closing never goes smaller than collapsed,
+        // which would uncover the window edge it hides.
         let t = progress.max(0.0);
-        let width = egui::emath::lerp(collapsed.width()..=expanded.width(), t);
-        let rect = Rect::from_min_size(collapsed.min, vec2(width, collapsed.height()));
+        let shown = t.min(1.0);
+        let rect = theme::sidebar_rect(collapsed, t);
+        // The logo keeps its place at the top and grows a little as the sidebar opens.
+        let pad = (theme::SIDEBAR_WIDTH - theme::LOGO_SIZE) / 2.0;
+        let size = egui::emath::lerp(theme::LOGO_SIZE..=theme::LOGO_SIZE_EXPANDED, shown);
+        let logo = Rect::from_min_size(rect.min + egui::Vec2::splat(pad), egui::Vec2::splat(size));
         egui::Area::new(id).order(egui::Order::Middle).fixed_pos(rect.min).show(ctx, |ui| {
             ui.allocate_rect(rect, Sense::hover());
             let painter = ui.painter();
-            theme::glass(&painter.with_clip_rect(rect.expand(24.0)), rect, theme::WINDOW_RADIUS, t.min(1.0), 0);
+            // Selected while open: the outline thickens and shimmers like a dropdown's.
+            theme::glass(&painter.with_clip_rect(rect.expand(24.0)), rect, theme::WINDOW_RADIUS, shown, 0, shown);
             painter.image(self.logo.id(), logo, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), egui::Color32::WHITE);
+            if shown > 0.0 {
+                // "Hermes" in Pacifico, its letters as tall as the logo, revealed as the
+                // sidebar widens (clipped to it) and fading in.
+                let probe = painter.layout_no_wrap("Hermes".into(), theme::wordmark_font(100.0), theme::TEXT);
+                let font_size = 100.0 * size / probe.mesh_bounds.height().max(1.0);
+                let color = theme::TEXT.gamma_multiply(shown);
+                let galley = painter.layout_no_wrap("Hermes".into(), theme::wordmark_font(font_size), color);
+                let ink = galley.mesh_bounds;
+                let pos = pos2(logo.max.x + 12.0 - ink.min.x, logo.center().y - ink.center().y);
+                painter.with_clip_rect(rect.shrink(theme::STROKE_WIDTH)).galley(pos, galley, color);
+            }
         });
     }
 
-    fn title_bar(&self, ui: &mut egui::Ui, bar: Rect) {
+    fn title_bar(&mut self, ui: &mut egui::Ui, bar: Rect) {
         let ctx = ui.ctx().clone();
-        let drag = ui.interact(bar, Id::unique("title_bar"), Sense::click_and_drag());
+        let size = vec2(40.0, 32.0);
+        let close = Rect::from_center_size(pos2(bar.max.x - 32.0, bar.center().y + 1.0), size);
+        let minimise = close.translate(vec2(-(size.x + 6.0), 0.0));
+        // Account switcher: in the bar, left of the minimise button.
+        let account = Rect::from_min_size(
+            pos2(minimise.min.x - 12.0 - theme::ACCOUNT_SIZE.x, bar.center().y + 1.0 - theme::ACCOUNT_SIZE.y / 2.0),
+            theme::ACCOUNT_SIZE,
+        );
+        // The window drags from the bar but never from its controls: the drag zone
+        // stops just left of the account switcher, so pressing a control can't start a move.
+        let drag_zone = Rect::from_min_max(bar.min, pos2(account.min.x - 6.0, bar.max.y));
+        let drag = ui.interact(drag_zone, Id::unique("title_bar"), Sense::click_and_drag());
         if drag.drag_started() {
             ctx.send_viewport_cmd(ViewportCommand::StartDrag);
         }
-        // Brand wordmark in Amsterdam Four (not translated).
-        ui.painter().text(
-            // The script's tall capitals rise well above the text box, so it sits low in the bar.
-            pos2(bar.min.x + 22.0, bar.center().y + 17.0),
-            Align2::LEFT_CENTER,
-            "Hermes",
-            theme::wordmark_font(32.0),
-            theme::TEXT,
+        // Faint divider along the bottom of the bar the window buttons sit in,
+        // stopping short of the window's outline on the right.
+        let y = bar.max.y - 0.5;
+        ui.painter().line_segment(
+            [pos2(bar.min.x, y), pos2(bar.max.x - theme::STROKE_WIDTH, y)],
+            Stroke::new(1.0, theme::OUTLINE),
         );
 
-        let size = vec2(32.0, 24.0);
-        let close = Rect::from_center_size(pos2(bar.max.x - 30.0, bar.center().y + 2.0), size);
-        let minimise = close.translate(vec2(-(size.x + 6.0), 0.0));
         if bar_button(ui, close, "window.close", true, |p, c, color| {
-            let d = 4.5;
+            let d = 5.5;
             p.line_segment([c + vec2(-d, -d), c + vec2(d, d)], Stroke::new(theme::ICON_STROKE, color));
             p.line_segment([c + vec2(-d, d), c + vec2(d, -d)], Stroke::new(theme::ICON_STROKE, color));
         }) {
             ctx.send_viewport_cmd(ViewportCommand::Close);
         }
         if bar_button(ui, minimise, "window.minimise", false, |p, c, color| {
-            p.line_segment([c + vec2(-5.0, 0.0), c + vec2(5.0, 0.0)], Stroke::new(theme::ICON_STROKE, color));
+            p.line_segment([c + vec2(-6.0, 0.0), c + vec2(6.0, 0.0)], Stroke::new(theme::ICON_STROKE, color));
         }) {
             ctx.send_viewport_cmd(ViewportCommand::Minimized(true));
+        }
+
+        let items: Vec<dropdown::Item> = self
+            .accounts
+            .iter()
+            .map(|name| dropdown::Item { label: name.clone(), icon: Some(dropdown::Icon::Color(theme::HEAD_PLACEHOLDER)) })
+            .collect();
+        if let Some(i) = dropdown::show(&ctx, Id::unique(ACCOUNT_DROPDOWN), account, Direction::Down, &items, self.selected_account) {
+            self.selected_account = i;
         }
     }
 
@@ -367,7 +395,7 @@ impl HermesApp {
             painter.rect_filled(done, theme::radius(2), theme::PLAY);
         }
         // Long labels (and longer translations) truncate with an ellipsis inside the button.
-        let mut job = egui::text::LayoutJob::simple_singleline(label.clone(), FontId::proportional(rect.height() * 0.38), text_color);
+        let mut job = egui::text::LayoutJob::simple_singleline(label.clone(), theme::text_font(rect.height() * 0.38), text_color);
         job.wrap = egui::text::TextWrapping::truncate_at_width(rect.width() - 2.0 * theme::CONTROL_RADIUS as f32 - 8.0);
         let galley = painter.layout_job(job);
         // Lift the label slightly when the progress track sits under it.
@@ -464,7 +492,9 @@ fn load_png(ctx: &Context, name: &str, bytes: &[u8]) -> TextureHandle {
         .to_rgba8();
     let size = [image.width() as usize, image.height() as usize];
     let color = egui::ColorImage::from_rgba_unmultiplied(size, image.as_raw());
-    ctx.load_texture(name, color, TextureOptions::LINEAR)
+    // Mipmaps keep large source images smooth when drawn small (logo, profile icons).
+    let options = TextureOptions { mipmap_mode: Some(egui::TextureFilter::Linear), ..TextureOptions::LINEAR };
+    ctx.load_texture(name, color, options)
 }
 
 impl eframe::App for HermesApp {
@@ -483,45 +513,38 @@ impl eframe::App for HermesApp {
         painter.rect_filled(window, theme::radius(theme::WINDOW_RADIUS), theme::BG);
         theme::outline(&painter, window, theme::WINDOW_RADIUS);
 
-        // Custom bar across the top of the main window, right of the sidebar.
+        // Main content area: contents not designed yet.
+        let body = theme::body_layout(window, sidebar);
+        painter.rect_filled(body.content, theme::radius(theme::PANEL_RADIUS), theme::PANEL);
+        theme::outline(&painter, body.content, theme::PANEL_RADIUS);
+
+        self.sidebar(&ctx, sidebar);
+
+        // Custom bar across the top of the window, right of the sidebar.
         let bar = Rect::from_min_max(pos2(sidebar.max.x, window.min.y), pos2(window.max.x, window.min.y + theme::BAR_HEIGHT));
         self.title_bar(ui, bar);
-        // The template's main column sits below the bar (x positions include the sidebar).
-        let body = Rect::from_min_max(pos2(window.min.x, bar.max.y), window.max);
 
-        // Main content area: contents not designed yet.
-        let content = place(body, 78.0, 78.0, 1248.0, 579.0);
-        painter.rect_filled(content, theme::radius(theme::PANEL_RADIUS), theme::PANEL);
-        theme::outline(&painter, content, theme::PANEL_RADIUS);
-
-        // Logo: template size, centred in the collapsed sidebar with equal side and top margins.
-        let logo_area = place(window, 10.0, 12.0, 46.0, 40.0);
-        let logo_size = logo_area.width().min(logo_area.height());
-        let margin = (sidebar.width() - logo_size) / 2.0;
-        let logo = Rect::from_min_size(sidebar.min + egui::Vec2::splat(margin), egui::Vec2::splat(logo_size));
-        self.sidebar(&ctx, sidebar, logo);
-
-        self.play_button(ui, place(body, 1070.0, 675.0, 256.0, 58.0));
-        // Profile selector: left of Play, same size, opens upward (owner request, no mock-up yet).
-        self.profile_dropdown(&ctx, place(body, 796.0, 675.0, 256.0, 58.0));
-
-        let items: Vec<dropdown::Item> = self
-            .accounts
-            .iter()
-            .map(|name| dropdown::Item { label: name.clone(), icon: Some(dropdown::Icon::Color(theme::HEAD_PLACEHOLDER)) })
-            .collect();
-        let account = place(body, 1095.0, 13.0, 231.0, 50.0);
-        if let Some(i) = dropdown::show(&ctx, Id::unique(ACCOUNT_DROPDOWN), account, Direction::Down, &items, self.selected_account) {
-            self.selected_account = i;
-        }
+        self.play_button(ui, body.play);
+        // Profile selector: left of Play, same size, opens upward.
+        self.profile_dropdown(&ctx, body.profile);
 
         self.screenshot_tick(&ctx);
     }
 }
 
+/// Window and taskbar icon: the logo on a dark blue circle (the exe file gets the
+/// same artwork from `app_icon.ico`, see build.rs).
+fn app_icon() -> egui::IconData {
+    let image = image::load_from_memory_with_format(include_bytes!("../assets/images/app_icon.png"), image::ImageFormat::Png)
+        .expect("bundled PNG decodes")
+        .to_rgba8();
+    egui::IconData { width: image.width(), height: image.height(), rgba: image.into_raw() }
+}
+
 pub fn run(dev: DevOptions) -> eframe::Result {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
+            .with_icon(app_icon())
             .with_inner_size(theme::window_size())
             .with_decorations(false)
             .with_transparent(true)

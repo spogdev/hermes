@@ -1,13 +1,14 @@
-//! The wordmark font (Amsterdam Four) is licensed for personal use only, so it is
-//! never committed. When the file is present locally it is embedded; otherwise
-//! the wordmark falls back to the regular UI font.
+//! Embeds the app icon (the logo on a dark blue circle) into hermes.exe, so
+//! Explorer, shortcuts and pinned taskbar entries show it. The running window
+//! sets the same artwork itself (`ui::app_icon`).
 
-const WORDMARK_FONT: &str = "assets/fonts/amsterdam_four.ttf";
+const ICON: &str = "assets/images/app_icon.ico";
 
 fn main() {
-    println!("cargo::rerun-if-changed={WORDMARK_FONT}");
-    println!("cargo::rustc-check-cfg=cfg(wordmark_font)");
-    if std::path::Path::new(WORDMARK_FONT).is_file() {
-        println!("cargo::rustc-cfg=wordmark_font");
+    println!("cargo::rerun-if-changed={ICON}");
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {
+        let mut resource = winresource::WindowsResource::new();
+        resource.set_icon(ICON);
+        resource.compile().expect("embedding the app icon (needs the Windows SDK resource compiler)");
     }
 }
