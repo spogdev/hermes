@@ -92,7 +92,7 @@ pub fn show(ctx: &Context, id: Id, anchor: Rect, direction: Direction, items: &[
                 continue;
             }
             if open {
-                let hit = ui.interact(row, id.with(("row", k)), Sense::click()).on_hover_cursor(CursorIcon::PointingHand);
+                let hit = ui.interact(row, id.with(("row", k)), Sense::click());
                 hit.widget_info(|| WidgetInfo::selected(Role::ListBoxOption, true, k == selected, &item.label));
                 if hit.hovered() || hit.is_pointer_button_down_on() {
                     let tint = if hit.is_pointer_button_down_on() { theme::GLASS_PRESS } else { theme::GLASS_HOVER };
@@ -115,7 +115,12 @@ pub fn show(ctx: &Context, id: Id, anchor: Rect, direction: Direction, items: &[
         if !open && response.has_focus() {
             theme::focus_ring(ui.painter(), sc(panel), rounding);
         }
-        if !open && t <= 0.0 && response.on_hover_cursor(CursorIcon::PointingHand).clicked() {
+        // One pointer cursor over the whole dropdown, in every state: open, closed,
+        // mid-animation and between rows, so it never flickers back to the arrow.
+        if ui.input(|i| i.pointer.hover_pos().is_some_and(|p| panel.contains(p))) {
+            ui.ctx().set_cursor_icon(CursorIcon::PointingHand);
+        }
+        if !open && t <= 0.0 && response.clicked() {
             open = true;
         }
         let pressed_outside =

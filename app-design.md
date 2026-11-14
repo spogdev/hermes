@@ -62,7 +62,15 @@ The v1 template (below) set the arrangement; the current build lays it out direc
 - **A move always finishes before it can reverse**: once it starts opening it fully opens, once it
   starts closing it fully closes. Opening overshoots slightly; closing doesn't shrink below the
   collapsed size.
-- Expanded it's a glass panel with a shadow and the selected outline. Other contents aren't designed yet.
+- Expanded it's a glass panel with a shadow and the selected outline.
+- **Navigation rows**: **Home** under the logo and **Settings** at the very bottom (owner's icons,
+  `assets/images/icon_home*.png`, `icon_settings*.png`). Collapsed, only the icon shows (26 px,
+  centred in the 75 px sidebar); as the sidebar opens the label appears beside it on the same
+  slide-and-fade as the wordmark. **Hovering fills the icon** (outline and filled versions share one
+  frame so the swap doesn't shift). Each row has a **hollow, semi-transparent rounded outline**
+  (1.5 px, 22% text colour, 40% on hover) of **fixed length: the full width of the open sidebar**;
+  while the sidebar is narrower it's cut off at the sidebar's edge. The pages they open aren't
+  designed yet, so clicking does nothing for now.
 
 ## Control states
 
@@ -82,6 +90,8 @@ The v1 template (below) set the arrangement; the current build lays it out direc
   the gradient (`theme::selectable_outline`).
 - **Keyboard focus**: 2 px `#0A84FF` ring just outside the focused control (Tab moves focus,
   Enter/Space activates).
+- **Cursor**: the pointer (hand) cursor stays on for the whole time the mouse is over a dropdown,
+  in every state, with no flicker back to the arrow (owner request).
 - Tooltips use the app palette (panel fill, outline, control radius).
 
 ## Text
@@ -135,6 +145,8 @@ Keys have no `launcher.` prefix (owner request).
 | `window.close` | Close button in the top bar (screen-reader name, not drawn) | |
 | `window.minimise` | Minimise button in the top bar (screen-reader name, not drawn) | |
 | `profile.unnamed` | Profile dropdown, a profile without a name | Unnamed Profile |
+| `sidebar.home` | Sidebar Home row label (shown when the sidebar is open) | Home |
+| `sidebar.settings` | Sidebar Settings row label (shown when the sidebar is open) | Settings |
 
 ## Assets
 

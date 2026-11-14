@@ -92,6 +92,14 @@ const SIDEBAR_BOUNCE_ROOM: f32 = 40.0;
 /// Logo size in the collapsed sidebar, and while it is expanded.
 pub const LOGO_SIZE: f32 = 48.0;
 pub const LOGO_SIZE_EXPANDED: f32 = 54.0;
+/// Sidebar navigation rows (Home at the top, Settings at the bottom).
+pub const NAV_ROW_HEIGHT: f32 = 48.0;
+/// Side and edge spacing of the rows inside the sidebar.
+pub const NAV_INSET: f32 = 10.0;
+pub const NAV_ICON_SIZE: f32 = 26.0;
+/// The hollow outline around each row: a fixed length, the full width of the open
+/// sidebar; while the sidebar is narrower it's simply cut off by the sidebar's edge.
+pub const NAV_ROW_WIDTH: f32 = SIDEBAR_EXPANDED_WIDTH - 2.0 * NAV_INSET;
 /// Spacing between the main areas (content box, bottom controls, edges).
 pub const GAP: f32 = 14.0;
 /// Launch button and profile dropdown size.

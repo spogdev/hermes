@@ -10,5 +10,7 @@
   "profile.unnamed": "Unnamed Profile",
   "window.close": "",
   "window.minimise": "",
-  "status.stop": "Stop"
+  "status.stop": "Stop",
+  "sidebar.home": "Home",
+  "sidebar.settings": "Settings"
 }

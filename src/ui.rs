@@ -50,6 +50,7 @@ enum Phase {
 struct HermesApp {
     phase: Arc<Mutex<Phase>>,
     logo: TextureHandle,
+    nav_icons: NavIcons,
     accounts: Vec<String>,
     selected_account: usize,
     /// Data folder; `None` if it couldn't be created (the error is shown on Play).
@@ -113,6 +114,12 @@ impl HermesApp {
             profile_icons,
             phase: Arc::new(Mutex::new(phase)),
             logo: load_png(ctx, "logo", include_bytes!("../assets/images/logo.png")),
+            nav_icons: NavIcons {
+                home: load_png(ctx, "icon_home", include_bytes!("../assets/images/icon_home.png")),
+                home_filled: load_png(ctx, "icon_home_filled", include_bytes!("../assets/images/icon_home_filled.png")),
+                settings: load_png(ctx, "icon_settings", include_bytes!("../assets/images/icon_settings.png")),
+                settings_filled: load_png(ctx, "icon_settings_filled", include_bytes!("../assets/images/icon_settings_filled.png")),
+            },
             // Offline mode has one account; Microsoft accounts will fill this list.
             accounts: vec![launch::PLAYER_NAME.to_string()],
             selected_account: 0,
@@ -299,6 +306,15 @@ impl HermesApp {
                 let pos = pos2(logo.max.x + 12.0 - slide - ink.min.x, logo.center().y - ink.center().y);
                 painter.with_clip_rect(rect.shrink(theme::STROKE_WIDTH)).galley(pos, galley, color);
             }
+
+            // Navigation: Home under the logo, Settings at the very bottom. Pages for
+            // them aren't designed yet, so they don't navigate anywhere yet.
+            let pad_top = (theme::SIDEBAR_WIDTH - theme::LOGO_SIZE) / 2.0;
+            let home_y = rect.min.y + pad_top + theme::LOGO_SIZE + 18.0;
+            let settings_y = rect.max.y - theme::NAV_INSET - theme::NAV_ROW_HEIGHT;
+            let icons = &self.nav_icons;
+            nav_row(ui, rect, home_y, Id::unique("nav_home"), "sidebar.home", &icons.home, &icons.home_filled, word.value);
+            nav_row(ui, rect, settings_y, Id::unique("nav_settings"), "sidebar.settings", &icons.settings, &icons.settings_filled, word.value);
         });
     }
 
@@ -469,6 +485,48 @@ impl HermesApp {
                 ctx2.send_viewport_cmd(ViewportCommand::Close);
             });
         }
+    }
+}
+
+/// Outline and filled versions of the sidebar's navigation icons.
+struct NavIcons {
+    home: TextureHandle,
+    home_filled: TextureHandle,
+    settings: TextureHandle,
+    settings_filled: TextureHandle,
+}
+
+/// One sidebar navigation row at height `y` inside the sidebar `panel`: the icon
+/// (outline, filled while hovered), its label beside it (shown as the sidebar
+/// opens, on the same reveal as the wordmark, `reveal` 0..1+), and a hollow,
+/// semi-transparent rounded outline of fixed length around both.
+fn nav_row(ui: &mut egui::Ui, panel: Rect, y: f32, id: Id, label_key: &str, icon: &TextureHandle, filled: &TextureHandle, reveal: f32) {
+    let row = Rect::from_min_size(pos2(panel.min.x + theme::NAV_INSET, y), vec2(theme::NAV_ROW_WIDTH, theme::NAV_ROW_HEIGHT));
+    let clip = panel.shrink(theme::STROKE_WIDTH);
+    let label = tr(label_key);
+    // Only the part of the row inside the sidebar responds to the pointer.
+    let response = ui.interact(row.intersect(clip), id, Sense::click());
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, &label));
+    let hovered = response.hovered();
+    let painter = ui.painter().with_clip_rect(clip);
+
+    let edge = theme::TEXT.gamma_multiply(if hovered { 0.40 } else { 0.22 });
+    painter.rect_stroke(row, theme::radius(theme::SMALL_RADIUS + 3), Stroke::new(1.5, edge), StrokeKind::Inside);
+
+    // The icon sits centred in the collapsed sidebar, so it never moves sideways.
+    let center = pos2(panel.min.x + theme::SIDEBAR_WIDTH / 2.0, row.center().y);
+    let icon_rect = Rect::from_center_size(center, egui::Vec2::splat(theme::NAV_ICON_SIZE));
+    let texture = if hovered { filled } else { icon };
+    painter.image(texture.id(), icon_rect, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), egui::Color32::WHITE);
+
+    let shown = reveal.clamp(0.0, 1.0);
+    if shown > 0.0 {
+        let color = theme::TEXT.gamma_multiply(shown);
+        let slide = 10.0 * (1.0 - reveal);
+        painter.text(pos2(icon_rect.max.x + 14.0 - slide, row.center().y), Align2::LEFT_CENTER, label, theme::text_font(16.0), color);
+    }
+    if response.has_focus() {
+        theme::focus_ring(&painter, row.intersect(clip), theme::SMALL_RADIUS + 3);
     }
 }
 
