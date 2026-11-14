@@ -123,17 +123,19 @@ pub fn frame_layout(area: Rect) -> (Rect, Rect) {
     (main, Rect::from_min_max(main.min, pos2(main.min.x + SIDEBAR_WIDTH, main.max.y)))
 }
 
-/// The sidebar at expansion `t` (0 collapsed, 1 expanded; the spring may pass 1):
-/// it widens over the window and grows past its top, bottom and left edges.
-pub fn sidebar_rect(collapsed: Rect, t: f32) -> Rect {
-    let out = SIDEBAR_OUTSET * t;
-    let width = SIDEBAR_WIDTH + (SIDEBAR_EXPANDED_WIDTH - SIDEBAR_WIDTH) * t;
+/// The sidebar at `width_t` (how far it has widened) and `outset_t` (how far it
+/// has grown past the window's top, bottom and left edges): 0 collapsed, 1
+/// expanded; springs may pass 1. They move separately so the growth can trail
+/// the widening.
+pub fn sidebar_rect(collapsed: Rect, width_t: f32, outset_t: f32) -> Rect {
+    let out = SIDEBAR_OUTSET * outset_t;
+    let width = SIDEBAR_WIDTH + (SIDEBAR_EXPANDED_WIDTH - SIDEBAR_WIDTH) * width_t;
     Rect::from_min_max(collapsed.min - Vec2::splat(out), pos2(collapsed.min.x + width, collapsed.max.y + out))
 }
 
 /// Everything the sidebar can cover, overshoot included (for the window clip).
 pub fn sidebar_reach(collapsed: Rect) -> Rect {
-    let full = sidebar_rect(collapsed, 1.0);
+    let full = sidebar_rect(collapsed, 1.0, 1.0);
     Rect::from_min_max(
         collapsed.min - Vec2::splat(SIDEBAR_ROOM),
         pos2(full.max.x + SIDEBAR_BOUNCE_ROOM, collapsed.max.y + SIDEBAR_ROOM),
@@ -166,7 +168,7 @@ pub fn radius(r: u8) -> CornerRadius {
 /// The app's outline: a 2 px edge that shifts from the Play blue to `SHINE` along
 /// the diagonal, with faint facet bands, so it catches light like a cut diamond.
 pub fn outline(painter: &Painter, rect: Rect, r: u8) {
-    selectable_outline(painter, rect, r, 0.0, 0.0);
+    selectable_outline(painter, rect, radius(r), 0.0, 0.0);
 }
 
 /// Extra outline width when an element is fully selected (hovered, focused or open).
@@ -177,15 +179,19 @@ const SHIMMER_SPEED: f32 = 0.35;
 /// The diamond outline of an element that can be selected. `selected` (0..1,
 /// animated by the caller) thickens it slightly and adds a soft band of light
 /// that travels along the gradient; `time` is the UI clock in seconds.
-pub fn selectable_outline(painter: &Painter, rect: Rect, r: u8, selected: f32, time: f32) {
+pub fn selectable_outline(painter: &Painter, rect: Rect, corners: CornerRadius, selected: f32, time: f32) {
     let width = STROKE_WIDTH + SELECTED_EXTRA_WIDTH * selected;
     let half = width / 2.0;
     let mut points = Vec::new();
-    // The path runs down the middle of the stroke, so its radius is reduced to stay concentric.
-    path::rounded_rectangle(&mut points, RoundedRect::new(rect.shrink(half), CornerRadiusF32::same((r as f32 - half).max(0.0))));
-    let phase = (time * SHIMMER_SPEED).fract();
+    // The path runs down the middle of the stroke, so its radii are reduced to stay concentric.
+    let inset = |r: u8| (r as f32 - half).max(0.0);
+    let path_corners = CornerRadiusF32 { nw: inset(corners.nw), ne: inset(corners.ne), sw: inset(corners.sw), se: inset(corners.se) };
+    path::rounded_rectangle(&mut points, RoundedRect::new(rect.shrink(half), path_corners));
+    // With animations turned off in Windows the light band holds still.
+    let still = reduce_motion();
+    let phase = if still { 0.25 } else { (time * SHIMMER_SPEED).fract() };
     painter.add(PathShape::closed_line(points, PathStroke::new_uv(width, move |bounds, p| diamond(bounds, p, selected, phase))));
-    if selected > 0.0 {
+    if selected > 0.0 && !still {
         painter.ctx().request_repaint();
     }
 }
@@ -209,7 +215,7 @@ fn diamond(bounds: Rect, p: Pos2, selected: f32, phase: f32) -> Color32 {
 /// a white tint, the diamond outline, and a shadow that grows as it opens
 /// (`t` 0 = collapsed, 1 = open; `resting_shadow` = shadow alpha when collapsed;
 /// `selected` 0..1 drives the selected outline, see `selectable_outline`).
-pub fn glass(painter: &Painter, rect: Rect, r: u8, t: f32, resting_shadow: u8, selected: f32) {
+pub fn glass(painter: &Painter, rect: Rect, corners: CornerRadius, t: f32, resting_shadow: u8, selected: f32) {
     let alpha = resting_shadow as f32 + (120.0 - resting_shadow as f32) * t;
     if alpha >= 1.0 {
         let shadow = Shadow {
@@ -218,11 +224,11 @@ pub fn glass(painter: &Painter, rect: Rect, r: u8, t: f32, resting_shadow: u8, s
             spread: 0,
             color: Color32::from_black_alpha(alpha as u8),
         };
-        painter.add(shadow.as_shape(rect, radius(r)));
+        painter.add(shadow.as_shape(rect, corners));
     }
-    painter.rect_filled(rect, radius(r), PANEL);
-    painter.rect_filled(rect, radius(r), GLASS_TINT);
-    selectable_outline(painter, rect, r, selected, painter.ctx().input(|i| i.time) as f32);
+    painter.rect_filled(rect, corners, PANEL);
+    painter.rect_filled(rect, corners, GLASS_TINT);
+    selectable_outline(painter, rect, corners, selected, painter.ctx().input(|i| i.time) as f32);
 }
 
 /// Animated 0..1 "selected" amount for an element (hovered, focused or open), so
@@ -245,13 +251,40 @@ struct Spring {
     velocity: f32,
 }
 
-/// Moves the value stored under `id` toward `target` on the shared spring and
-/// returns `(value, settled)`. The value starts at 0.
-pub fn spring(ctx: &Context, id: Id, target: f32) -> (f32, bool) {
-    let id = id.with("spring");
+/// State of a value moving on the shared spring.
+#[derive(Clone, Copy, Debug)]
+pub struct Motion {
+    pub value: f32,
+    /// Units per second; used for effects that respond to speed.
+    pub velocity: f32,
+    pub settled: bool,
+}
+
+/// True when Windows' "Show animations in Windows" setting is off. Read once.
+pub fn reduce_motion() -> bool {
+    static REDUCE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *REDUCE.get_or_init(|| {
+        use windows_sys::Win32::UI::WindowsAndMessaging::{SPI_GETCLIENTAREAANIMATION, SystemParametersInfoW};
+        let mut enabled: windows_sys::core::BOOL = 1;
+        // SAFETY: the out-pointer is a valid BOOL for this query.
+        let ok = unsafe { SystemParametersInfoW(SPI_GETCLIENTAREAANIMATION, 0, (&mut enabled as *mut windows_sys::core::BOOL).cast(), 0) };
+        ok != 0 && enabled == 0
+    })
+}
+
+fn spring_id(id: Id) -> Id {
+    id.with("spring")
+}
+
+/// Moves the value stored under `id` toward `target` on the shared spring. The
+/// value starts at 0. With animations turned off in Windows it jumps straight
+/// to the target. Call once per frame per `id` (use `spring_peek` to only read).
+pub fn spring_motion(ctx: &Context, id: Id, target: f32) -> Motion {
+    let id = spring_id(id);
     let mut s = ctx.data(|d| d.get_temp::<Spring>(id)).unwrap_or_default();
-    if s.value == target && s.velocity == 0.0 {
-        return (target, true);
+    if (s.value == target && s.velocity == 0.0) || reduce_motion() {
+        ctx.data_mut(|d| d.insert_temp(id, Spring { value: target, velocity: 0.0 }));
+        return Motion { value: target, velocity: 0.0, settled: true };
     }
     s = spring_step(s, target, ctx.input(|i| i.stable_dt).min(1.0 / 20.0));
     let settled = (s.value - target).abs() < 1e-3 && s.velocity.abs() < 1e-2;
@@ -261,7 +294,19 @@ pub fn spring(ctx: &Context, id: Id, target: f32) -> (f32, bool) {
         ctx.request_repaint();
     }
     ctx.data_mut(|d| d.insert_temp(id, s));
-    (s.value, settled)
+    Motion { value: s.value, velocity: s.velocity, settled }
+}
+
+/// Reads a spring without advancing it (settled = at rest).
+pub fn spring_peek(ctx: &Context, id: Id) -> Motion {
+    let s = ctx.data(|d| d.get_temp::<Spring>(spring_id(id))).unwrap_or_default();
+    Motion { value: s.value, velocity: s.velocity, settled: s.velocity == 0.0 }
+}
+
+/// `spring_motion` as `(value, settled)`.
+pub fn spring(ctx: &Context, id: Id, target: f32) -> (f32, bool) {
+    let m = spring_motion(ctx, id, target);
+    (m.value, m.settled)
 }
 
 /// Scale (around 1.0) of a control that shrinks while `pressed` and springs back
@@ -366,6 +411,20 @@ mod tests {
     }
 
     #[test]
+    fn follower_springs_trail_the_lead_and_settle_together() {
+        // The sidebar's growth and logo chase the width on the same spring.
+        let (mut lead, mut follow) = (Spring::default(), Spring::default());
+        let mut trailed = false;
+        for _ in 0..240 {
+            lead = spring_step(lead, 1.0, 1.0 / 120.0);
+            follow = spring_step(follow, lead.value, 1.0 / 120.0);
+            trailed |= lead.value - follow.value > 0.1;
+        }
+        assert!(trailed, "the follower should visibly lag the lead");
+        assert!((lead.value - 1.0).abs() < 1e-3 && (follow.value - 1.0).abs() < 1e-3);
+    }
+
+    #[test]
     fn scale_about_keeps_center() {
         let r = Rect::from_min_size(pos2(10.0, 10.0), vec2(100.0, 40.0));
         let s = scale_about(r, r.center(), 0.9);
@@ -381,12 +440,12 @@ mod tests {
         assert!(main.contains_rect(sidebar));
         assert_eq!((sidebar.min, sidebar.max.y, sidebar.width()), (main.min, main.max.y, SIDEBAR_WIDTH));
         // Expanded, it passes the window's top, bottom and left edges by the outset...
-        let open = sidebar_rect(sidebar, 1.0);
+        let open = sidebar_rect(sidebar, 1.0, 1.0);
         assert_eq!(open.min, main.min - Vec2::splat(SIDEBAR_OUTSET));
         assert_eq!(open.max.y, main.max.y + SIDEBAR_OUTSET);
         // ...and even with spring overshoot it stays inside the clip and the native window.
         let reach = sidebar_reach(sidebar);
-        assert!(reach.contains_rect(sidebar_rect(sidebar, 1.15)));
+        assert!(reach.contains_rect(sidebar_rect(sidebar, 1.15, 1.15)));
         assert!(area.contains_rect(reach.shrink(0.01)));
     }
 

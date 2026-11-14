@@ -76,7 +76,7 @@ pub fn show(ctx: &Context, id: Id, anchor: Rect, direction: Direction, items: &[
         let center = panel.center();
         let sc = |r: Rect| theme::scale_about(r, center, scale);
         let highlight = theme::selected_amount(ctx, id, open || response.hovered() || response.has_focus());
-        theme::glass(&ui.painter().with_clip_rect(sc(panel).expand(24.0)), sc(panel), rounding, t, RESTING_SHADOW, highlight);
+        theme::glass(&ui.painter().with_clip_rect(sc(panel).expand(24.0)), sc(panel), theme::radius(rounding), t, RESTING_SHADOW, highlight);
         let clip = ui.painter().with_clip_rect(sc(panel).shrink(1.0));
         if !open && (response.hovered() || response.is_pointer_button_down_on()) {
             let tint = if response.is_pointer_button_down_on() { theme::GLASS_PRESS } else { theme::GLASS_HOVER };

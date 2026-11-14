@@ -41,6 +41,7 @@ fn dev_options(args: &[String]) -> ui::DevOptions {
         state: value_of(args, "--state"),
         focus: value_of(args, "--focus"),
         open_sidebar: args.iter().any(|a| a == "--open-sidebar"),
+        screenshot_frame: value_of(args, "--screenshot-frame").and_then(|v| v.parse().ok()),
     }
 }
 

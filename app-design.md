@@ -48,6 +48,13 @@ The v1 template (below) set the arrangement; the current build lays it out direc
   8 px overhang it once had). The window keeps transparent room for that, invisible while collapsed.
 - While it opens, the **logo grows a little** (48 to 54 px) and **"Hermes" appears to its right in
   Pacifico**, its letters as tall as the logo, revealed as the sidebar widens and fading in.
+- **Organic motion** (owner request): everything moves on the shared spring, layered so the
+  sidebar reads as soft material: the **width leads**; the **growth past the window edges and the
+  logo trail it** on their own springs (a beat behind); the **leading corners round out with
+  speed** (up to +26 px radius) and settle back; **"Hermes" waits until the panel is past halfway**,
+  then slides in 10 px while fading up, and **leaves first when closing**. Opens in about 0.5 s.
+- **Reduced motion**: with Windows' "Show animations" turned off, every spring (sidebar, buttons,
+  dropdowns) jumps straight to its end state and the outline's light band holds still.
 - **A move always finishes before it can reverse**: once it starts opening it fully opens, once it
   starts closing it fully closes. Opening overshoots slightly; closing doesn't shrink below the
   collapsed size.

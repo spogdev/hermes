@@ -27,6 +27,8 @@ pub struct DevOptions {
     pub state: Option<String>,
     pub focus: Option<String>,
     pub open_sidebar: bool,
+    /// Frame to capture with `--screenshot` (default 45, once animations have settled).
+    pub screenshot_frame: Option<u32>,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -65,6 +67,7 @@ struct HermesApp {
     focus: Option<Id>,
     /// Developer option: keep the sidebar expanded.
     force_sidebar: bool,
+    screenshot_frame: u32,
 }
 
 const ACCOUNT_DROPDOWN: &str = "account_dropdown";
@@ -105,6 +108,7 @@ impl HermesApp {
         let profile_icons = root.as_deref().map(|r| load_profile_icons(ctx, r, &profiles)).unwrap_or_default();
         HermesApp {
             force_sidebar: dev.open_sidebar,
+            screenshot_frame: dev.screenshot_frame.unwrap_or(45),
             focus,
             profile_icons,
             phase: Arc::new(Mutex::new(phase)),
@@ -225,48 +229,68 @@ impl HermesApp {
         }
     }
 
-    /// Full-height sidebar inside the window. While hovered it grows, on the same
-    /// spring as buttons and dropdowns: it widens over the window and slightly past
-    /// the window's top, bottom and left edges, the logo grows a little, and the
-    /// "Hermes" wordmark appears beside it. Other contents aren't designed yet.
+    /// Full-height sidebar inside the window. While hovered it opens over the
+    /// window and slightly past its top, bottom and left edges, the logo grows a
+    /// little, and the "Hermes" wordmark appears beside it. Other contents aren't
+    /// designed yet.
+    ///
+    /// Motion: everything moves on the app's one spring (same physics as buttons
+    /// and dropdowns), layered so it reads as soft material rather than a box:
+    /// the width leads; the growth past the edges and the logo chase it on their
+    /// own springs, so they trail a beat; the leading (right) corners round out
+    /// with speed; the wordmark waits until the panel is past halfway, then
+    /// slides in, and on closing it leaves first.
     fn sidebar(&self, ctx: &Context, collapsed: Rect) {
         let id = Id::unique("sidebar");
-        let expanded = theme::sidebar_rect(collapsed, 1.0);
         // `open` is the direction the sidebar is moving in. It stays open while the
         // pointer is anywhere over the expanded panel, and it only changes direction
-        // once a move has finished: opening always fully opens, closing fully closes.
-        // It moves on the same spring as button presses, so it bounces the same way.
+        // once the width has settled: opening always fully opens, closing fully closes.
         let open = ctx.data(|d| d.get_temp::<bool>(id)).unwrap_or(false);
-        let (_, settled) = theme::spring(ctx, id, if open { 1.0 } else { 0.0 });
-        let hover_area = if open { expanded } else { collapsed };
-        let wants_open = self.force_sidebar || ctx.pointer_hover_pos().is_some_and(|p| hover_area.contains(p));
-        let open = if settled { wants_open } else { open };
+        let hover_area = if open { theme::sidebar_rect(collapsed, 1.0, 1.0) } else { collapsed };
+        // (The debug `--open-sidebar` option opens it from frame 10, once frame timing is steady.)
+        let forced = self.force_sidebar && self.frames >= 10;
+        let wants_open = forced || ctx.pointer_hover_pos().is_some_and(|p| hover_area.contains(p));
+        let open = if theme::spring_peek(ctx, id).settled { wants_open } else { open };
         ctx.data_mut(|d| d.insert_temp(id, open));
-        let (progress, _) = theme::spring(ctx, id, if open { 1.0 } else { 0.0 });
+
+        let width = theme::spring_motion(ctx, id, if open { 1.0 } else { 0.0 });
+        let outset = theme::spring_motion(ctx, id.with("outset"), width.value);
+        let grow = theme::spring_motion(ctx, id.with("logo"), width.value);
+        let word = theme::spring_motion(ctx, id.with("word"), if open && width.value > 0.55 { 1.0 } else { 0.0 });
+
         // Opening overshoots slightly; closing never goes smaller than collapsed,
         // which would uncover the window edge it hides.
-        let t = progress.max(0.0);
+        let t = width.value.max(0.0);
         let shown = t.min(1.0);
-        let rect = theme::sidebar_rect(collapsed, t);
-        // The logo keeps its place at the top and grows a little as the sidebar opens.
+        let rect = theme::sidebar_rect(collapsed, t, outset.value.max(0.0));
+        // The leading edge softens while moving: its corners round out with speed.
+        let soften = (width.velocity.abs() * 4.0).min(26.0) as u8;
+        let corners = egui::CornerRadius {
+            ne: theme::WINDOW_RADIUS + soften,
+            se: theme::WINDOW_RADIUS + soften,
+            ..theme::radius(theme::WINDOW_RADIUS)
+        };
+        // The logo keeps its place at the top and grows a little, a beat behind the panel.
         let pad = (theme::SIDEBAR_WIDTH - theme::LOGO_SIZE) / 2.0;
-        let size = egui::emath::lerp(theme::LOGO_SIZE..=theme::LOGO_SIZE_EXPANDED, shown);
+        let size = egui::emath::lerp(theme::LOGO_SIZE..=theme::LOGO_SIZE_EXPANDED, grow.value.max(0.0));
         let logo = Rect::from_min_size(rect.min + egui::Vec2::splat(pad), egui::Vec2::splat(size));
         egui::Area::new(id).order(egui::Order::Middle).fixed_pos(rect.min).show(ctx, |ui| {
             ui.allocate_rect(rect, Sense::hover());
             let painter = ui.painter();
             // Selected while open: the outline thickens and shimmers like a dropdown's.
-            theme::glass(&painter.with_clip_rect(rect.expand(24.0)), rect, theme::WINDOW_RADIUS, shown, 0, shown);
+            theme::glass(&painter.with_clip_rect(rect.expand(24.0)), rect, corners, shown, 0, shown);
             painter.image(self.logo.id(), logo, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), egui::Color32::WHITE);
-            if shown > 0.0 {
-                // "Hermes" in Pacifico, its letters as tall as the logo, revealed as the
-                // sidebar widens (clipped to it) and fading in.
+            let reveal = word.value.clamp(0.0, 1.0);
+            if reveal > 0.0 {
+                // "Hermes" in Pacifico, its letters as tall as the logo: slides in from
+                // just behind the logo while fading in, clipped to the panel.
                 let probe = painter.layout_no_wrap("Hermes".into(), theme::wordmark_font(100.0), theme::TEXT);
                 let font_size = 100.0 * size / probe.mesh_bounds.height().max(1.0);
-                let color = theme::TEXT.gamma_multiply(shown);
+                let color = theme::TEXT.gamma_multiply(reveal);
                 let galley = painter.layout_no_wrap("Hermes".into(), theme::wordmark_font(font_size), color);
                 let ink = galley.mesh_bounds;
-                let pos = pos2(logo.max.x + 12.0 - ink.min.x, logo.center().y - ink.center().y);
+                let slide = 10.0 * (1.0 - word.value);
+                let pos = pos2(logo.max.x + 12.0 - slide - ink.min.x, logo.center().y - ink.center().y);
                 painter.with_clip_rect(rect.shrink(theme::STROKE_WIDTH)).galley(pos, galley, color);
             }
         });
@@ -427,7 +451,7 @@ impl HermesApp {
                 ctx.memory_mut(|m| m.request_focus(id));
             }
         }
-        if self.frames == 45 {
+        if self.frames == self.screenshot_frame {
             let path = path.clone();
             let ctx2 = ctx.clone();
             ctx.request_screenshot(move |image| {
