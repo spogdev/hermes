@@ -53,6 +53,10 @@ The v1 template (below) set the arrangement; the current build lays it out direc
   logo trail it** on their own springs (a beat behind); the **leading corners round out with
   speed** (up to +26 px radius) and settle back; **"Hermes" waits until the panel is past halfway**,
   then slides in 10 px while fading up, and **leaves first when closing**. Opens in about 0.5 s.
+- **Predictive close** (owner request): while it's open, a fast pointer move (700+ px/s) whose
+  path 0.12 s ahead leaves the sidebar starts closing it immediately, before the pointer actually
+  exits. Fast moves that stay inside it don't, and neither do flicks that are more vertical than
+  horizontal (owner request).
 - **Reduced motion**: with Windows' "Show animations" turned off, every spring (sidebar, buttons,
   dropdowns) jumps straight to its end state and the outline's light band holds still.
 - **A move always finishes before it can reverse**: once it starts opening it fully opens, once it

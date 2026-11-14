@@ -142,6 +142,21 @@ pub fn sidebar_reach(collapsed: Rect) -> Rect {
     )
 }
 
+/// Pointer speed (points/second) above which a move counts as heading somewhere.
+const EXIT_SPEED: f32 = 700.0;
+/// How far ahead the pointer's path is projected when predicting an exit.
+const EXIT_LOOKAHEAD: f32 = 0.12;
+
+/// Whether a pointer at `pos` moving at `velocity` (points/second) is about to
+/// leave `area`: it's moving fast and its position a moment from now lies
+/// outside. Fast moves that stay within the area don't count, and neither do
+/// flicks that are more vertical than horizontal (moving up or down the menu).
+pub fn heading_out(area: Rect, pos: Pos2, velocity: Vec2) -> bool {
+    velocity.x.abs() > velocity.y.abs()
+        && velocity.length() >= EXIT_SPEED
+        && !area.contains(pos + velocity * EXIT_LOOKAHEAD)
+}
+
 /// Areas of the window below the top bar.
 pub struct Body {
     pub content: Rect,
@@ -408,6 +423,24 @@ mod tests {
         // A quick click (80 ms) still visibly shrinks.
         let quick = spring_step(Spring::default(), -PRESS_DEPTH, 0.08);
         assert!(quick.value < -PRESS_DEPTH * 0.5, "{}", quick.value);
+    }
+
+    #[test]
+    fn fast_moves_toward_an_edge_predict_an_exit() {
+        let menu = Rect::from_min_size(pos2(0.0, 0.0), vec2(300.0, 700.0));
+        let near_right_edge = pos2(250.0, 300.0);
+        // Flicking right toward the edge: about to leave.
+        assert!(heading_out(menu, near_right_edge, vec2(1500.0, 0.0)));
+        // The same direction, but slowly: just moving within the menu.
+        assert!(!heading_out(menu, near_right_edge, vec2(300.0, 0.0)));
+        // Fast but along the menu (up/down): stays inside, keep it open.
+        assert!(!heading_out(menu, pos2(150.0, 300.0), vec2(0.0, 1500.0)));
+        // Fast toward the far edge from deep inside: lands inside, keep it open.
+        assert!(!heading_out(menu, pos2(20.0, 300.0), vec2(1500.0, 0.0)));
+        // A mostly vertical flick that would leave through the bottom: keep it open.
+        assert!(!heading_out(menu, pos2(150.0, 680.0), vec2(400.0, 1500.0)));
+        // Mostly horizontal but angled: still an exit.
+        assert!(heading_out(menu, near_right_edge, vec2(1500.0, 900.0)));
     }
 
     #[test]

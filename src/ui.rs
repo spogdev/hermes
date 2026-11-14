@@ -249,7 +249,13 @@ impl HermesApp {
         let hover_area = if open { theme::sidebar_rect(collapsed, 1.0, 1.0) } else { collapsed };
         // (The debug `--open-sidebar` option opens it from frame 10, once frame timing is steady.)
         let forced = self.force_sidebar && self.frames >= 10;
-        let wants_open = forced || ctx.pointer_hover_pos().is_some_and(|p| hover_area.contains(p));
+        // A fast move heading out of the open sidebar closes it straight away,
+        // before the pointer has actually left, so it doesn't lag behind the hand.
+        let velocity = ctx.input(|i| i.pointer.velocity());
+        let wants_open = forced
+            || ctx
+                .pointer_hover_pos()
+                .is_some_and(|p| hover_area.contains(p) && !(open && theme::heading_out(hover_area, p, velocity)));
         let open = if theme::spring_peek(ctx, id).settled { wants_open } else { open };
         ctx.data_mut(|d| d.insert_temp(id, open));
 
