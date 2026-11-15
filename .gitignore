@@ -1,1 +1,7 @@
 /target
+
+# Local only: Claude and design notes, design mockups
+/CLAUDE.md
+/app-design.md
+/.impeccable/
+/design/
