@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "id": "hermes",
+  "version": "${version}",
+  "name": "Hermes Client",
+  "environment": "client",
+  "entrypoints": {
+    "client": ["dev.spog.hermes.HermesClient"]
+  },
+  "depends": {
+    "fabricloader": ">=0.20.1",
+    "minecraft": "26.1.2",
+    "java": ">=25"
+  }
+}

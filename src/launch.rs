@@ -90,6 +90,11 @@ impl Paths {
         })
     }
 
+    /// Where version profiles (Minecraft, Fabric) are cached.
+    pub fn versions_dir(&self) -> PathBuf {
+        self.versions.clone()
+    }
+
     pub fn game_output_log(&self) -> PathBuf {
         self.logs.join("game-output.log")
     }
@@ -141,12 +146,33 @@ impl std::fmt::Display for Step {
 }
 
 /// Installs what is missing and starts the game with `game_dir` as its game folder.
-pub fn launch(game_dir: &Path, status: &(dyn Fn(Step) + Sync)) -> Result<Launched> {
+/// `max_memory_mb` caps the game's heap (`-Xmx`); `None` keeps Mojang's default (4 GB).
+pub fn launch(game_dir: &Path, max_memory_mb: Option<u32>, status: &(dyn Fn(Step) + Sync)) -> Result<Launched> {
     let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
-    runtime.block_on(launch_async(game_dir, status))
+    runtime.block_on(launch_async(game_dir, max_memory_mb, status))
 }
 
-async fn launch_async(game_dir: &Path, status: &(dyn Fn(Step) + Sync)) -> Result<Launched> {
+/// The heap a profile gets when it hasn't chosen one: Mojang's own default (`-Xmx4G`).
+pub const DEFAULT_MEMORY_MB: u32 = 4096;
+
+/// Installed RAM in MB (0 if Windows can't say).
+pub fn system_memory_mb() -> u32 {
+    use windows_sys::Win32::System::SystemInformation::{GlobalMemoryStatusEx, MEMORYSTATUSEX};
+    let mut status = MEMORYSTATUSEX { dwLength: size_of::<MEMORYSTATUSEX>() as u32, ..unsafe { std::mem::zeroed() } };
+    // SAFETY: `status` is a valid MEMORYSTATUSEX with dwLength set, as the call requires.
+    if unsafe { GlobalMemoryStatusEx(&mut status) } == 0 {
+        return 0;
+    }
+    (status.ullTotalPhys / (1024 * 1024)) as u32
+}
+
+/// Replaces the version's `-Xmx` (Mojang's default) with `max_memory_mb`.
+fn set_max_memory(args: &mut Vec<String>, max_memory_mb: u32) {
+    args.retain(|a| !a.starts_with("-Xmx"));
+    args.insert(0, format!("-Xmx{max_memory_mb}M"));
+}
+
+async fn launch_async(game_dir: &Path, max_memory_mb: Option<u32>, status: &(dyn Fn(Step) + Sync)) -> Result<Launched> {
     let start = Instant::now();
     let paths = Paths::new()?;
     let client = reqwest::Client::builder()
@@ -171,9 +197,24 @@ async fn launch_async(game_dir: &Path, status: &(dyn Fn(Step) + Sync)) -> Result
     let env = Env::current();
     let tasks = file_tasks(&paths, &version, &assets, &runtime, &component, &env)?;
     let downloaded = ensure_all(&client, tasks, &|done, total| status(Step::Downloading { done, total })).await?;
+    // Every profile has Fabric API (owner request). Runs on the mod runtime, whose
+    // HTTP client it uses. Offline without it, the game still starts.
+    let dir = game_dir.to_path_buf();
+    let target = crate::mods::Target::from_profile_id(&version.id, MC_VERSION)
+        .unwrap_or(crate::mods::Target { minecraft: MC_VERSION.to_string(), loader: String::new() });
+    match crate::mods::runtime().spawn(async move { crate::mods::ensure_fabric_api(&dir, &target).await }).await {
+        Ok(Err(e)) => eprintln!("couldn't install Fabric API: {e:#}"),
+        Err(e) => eprintln!("couldn't install Fabric API: {e}"),
+        Ok(Ok(_)) => {}
+    }
 
     let bin = paths.runtime.join(&component).join("bin");
-    let args = game_command(&paths, game_dir, &version, &asset_ref.id, &env)?;
+    // The Hermes in-game client goes into every game the launcher starts.
+    let client_mod = real_path(&crate::client_mod::install(&paths.root)?)?;
+    let mut args = game_command(&paths, game_dir, &version, &asset_ref.id, &env, &client_mod)?;
+    if let Some(mb) = max_memory_mb {
+        set_max_memory(&mut args, mb);
+    }
     ensure_base_cds(&paths, &bin, &args, status)?;
 
     status(Step::Starting);
@@ -264,7 +305,14 @@ fn file_tasks(
 }
 
 /// Builds the arguments passed to `javaw.exe`: JVM options, main class, game options.
-fn game_command(paths: &Paths, game_dir: &Path, version: &VersionJson, asset_index_id: &str, env: &Env) -> Result<Vec<String>> {
+fn game_command(
+    paths: &Paths,
+    game_dir: &Path,
+    version: &VersionJson,
+    asset_index_id: &str,
+    env: &Env,
+    client_mod: &Path,
+) -> Result<Vec<String>> {
     // Each jar is resolved on its own: with folder redirection, files of one
     // folder can live in different real locations (see `real_path`).
     let mut classpath = Vec::new();
@@ -305,6 +353,7 @@ fn game_command(paths: &Paths, game_dir: &Path, version: &VersionJson, asset_ind
     if let Some(log) = log_config {
         args.push(rules::substitute(&log.argument, &vars));
     }
+    args.push(crate::client_mod::jvm_arg(client_mod));
     args.push(version.main_class.clone());
     args.extend(rules::expand(&version.arguments.game, env, &vars));
     Ok(args)
@@ -388,6 +437,13 @@ mod tests {
             cds_layout_flags(&args),
             ["-XX:+UseZGC", "-XX:+UseCompactObjectHeaders", "--enable-native-access=ALL-UNNAMED"]
         );
+    }
+
+    #[test]
+    fn max_memory_replaces_default_heap() {
+        let mut args: Vec<String> = ["-Xmx4G", "-XX:+UseZGC", "-cp", "x"].map(String::from).to_vec();
+        set_max_memory(&mut args, 6144);
+        assert_eq!(args, ["-Xmx6144M", "-XX:+UseZGC", "-cp", "x"]);
     }
 
     #[test]

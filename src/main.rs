@@ -1,14 +1,20 @@
 // Release builds are a GUI app with no console window.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod client_mod;
+mod profile_list;
+mod profile_popup;
 mod download;
 mod game_window;
 mod dropdown;
 mod lang;
 mod launch;
 mod meta;
+mod mods;
+mod profile_page;
 mod profiles;
 mod rules;
+mod shell;
 mod theme;
 mod ui;
 mod window_shape;
@@ -31,8 +37,9 @@ fn main() -> ExitCode {
 }
 
 /// Debug builds only: `--screenshot <png>` saves the window after it settles and
-/// exits; `--open-dropdown account`, `--state downloading|checking|running|failed`, `--open-sidebar` and
-/// `--focus play|account` set up the state to capture.
+/// exits; `--open-dropdown account`, `--state downloading|checking|running|failed`, `--open-sidebar`,
+/// `--page home|profiles|profile|settings` (`profile`: the first profile's page), `--browse` (that page
+/// browsing Modrinth), `--open-create`, `--open-edit` (the first profile) and `--focus account` set up the state to capture.
 #[cfg(debug_assertions)]
 fn dev_options(args: &[String]) -> ui::DevOptions {
     ui::DevOptions {
@@ -41,6 +48,10 @@ fn dev_options(args: &[String]) -> ui::DevOptions {
         state: value_of(args, "--state"),
         focus: value_of(args, "--focus"),
         open_sidebar: args.iter().any(|a| a == "--open-sidebar"),
+        page: value_of(args, "--page"),
+        open_create: args.iter().any(|a| a == "--open-create"),
+        open_edit: args.iter().any(|a| a == "--open-edit"),
+        browse: args.iter().any(|a| a == "--browse"),
         screenshot_frame: value_of(args, "--screenshot-frame").and_then(|v| v.parse().ok()),
     }
 }
@@ -68,7 +79,7 @@ fn headless() -> ExitCode {
     };
     println!("profile folder: {}", game_dir.display());
     let print = |s: launch::Step| println!("[{:>6} ms] {s}", start.elapsed().as_millis());
-    let mut launched = match launch::launch(&game_dir, &print) {
+    let mut launched = match launch::launch(&game_dir, None, &print) {
         Ok(l) => l,
         Err(e) => {
             eprintln!("launch failed: {e:#}");

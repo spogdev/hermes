@@ -11,13 +11,55 @@
 //! white line) and the drawing area is pushed 1 px past the window's bottom. So
 //! the region only covers the part of the drawing area inside the window, and the
 //! UI lays itself out in that visible part.
+//!
+//! The same hidden caption is why `keep_caption_hidden` exists: see there.
 
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use windows_sys::Win32::Foundation::{HWND, POINT, RECT};
 use windows_sys::Win32::Graphics::Gdi::{
     ClientToScreen, CombineRgn, CreateRectRgn, CreateRoundRectRgn, DeleteObject, RGN_OR, SetWindowRgn,
 };
-use windows_sys::Win32::UI::WindowsAndMessaging::{GetClientRect, GetWindowRect};
+use windows_sys::Win32::Foundation::{LPARAM, LRESULT, WPARAM};
+use windows_sys::Win32::UI::WindowsAndMessaging::{
+    CallWindowProcW, GWLP_WNDPROC, GetClientRect, GetWindowRect, SetWindowLongPtrW, WM_NCACTIVATE, WNDPROC,
+};
+use std::sync::atomic::{AtomicIsize, Ordering};
+
+/// winit's window procedure, which ours passes every message on to.
+static WINIT_PROC: AtomicIsize = AtomicIsize::new(0);
+
+/// Stops Windows flashing its default title bar over the top of the window when
+/// it's activated (clicked after a while in the background). winit keeps the
+/// caption style on borderless windows and only hides it by sizing; on
+/// activation the default handling of `WM_NCACTIVATE` repaints that caption,
+/// which shows until the app's next frame covers it. Passing `lParam = -1` on to
+/// it tells Windows not to repaint the non-client area; focus handling is
+/// unchanged. Call once, with the app's window.
+pub fn keep_caption_hidden(window: &impl HasWindowHandle) {
+    let Ok(handle) = window.window_handle() else { return };
+    let RawWindowHandle::Win32(win32) = handle.as_raw() else { return };
+    let hwnd = win32.hwnd.get() as HWND;
+    // SAFETY: hwnd is this app's live window, owned by this (the UI) thread. The
+    // previous procedure is stored before any message can reach ours, since
+    // messages for this window are only dispatched on this thread.
+    unsafe {
+        let ours: unsafe extern "system" fn(HWND, u32, WPARAM, LPARAM) -> LRESULT = no_caption_repaint;
+        let previous = SetWindowLongPtrW(hwnd, GWLP_WNDPROC, ours as isize);
+        if previous != 0 {
+            WINIT_PROC.store(previous, Ordering::Relaxed);
+        }
+    }
+}
+
+unsafe extern "system" fn no_caption_repaint(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+    let lparam = if msg == WM_NCACTIVATE { -1 } else { lparam };
+    // SAFETY: WINIT_PROC holds the window procedure ours replaced (set before
+    // any message arrives here), a valid WNDPROC for this window.
+    unsafe {
+        let previous: WNDPROC = std::mem::transmute::<isize, WNDPROC>(WINIT_PROC.load(Ordering::Relaxed));
+        CallWindowProcW(previous, hwnd, msg, wparam, lparam)
+    }
+}
 
 /// Visible part of the drawing area, in physical pixels from its top-left.
 #[derive(Clone, Copy, PartialEq, Debug)]

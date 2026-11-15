@@ -22,6 +22,12 @@ const SETTINGS_FILE: &str = "launcher.json";
 const MISNAMED_SETTINGS_FILE: &str = "json";
 /// Folder name for a profile without a name.
 const UNNAMED_FOLDER: &str = "Unnamed";
+/// File name of an icon chosen when the profile is created.
+const ICON_FILE: &str = "icon.png";
+/// Chosen icons are cropped to a square and stored at this size (pixels).
+const ICON_PIXELS: u32 = 128;
+/// Larger image files are refused rather than decoded.
+const ICON_MAX_BYTES: u64 = 20 * 1024 * 1024;
 
 /// Contents of `profile.json`. Add new details here; unknown fields in older
 /// or newer files are ignored and missing ones take their defaults.
@@ -39,6 +45,19 @@ pub struct ProfileInfo {
     /// Pinned profiles are listed on the home screen.
     #[serde(default, skip_serializing_if = "is_false")]
     pub pinned: bool,
+    /// Minecraft version chosen when the profile was created.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub minecraft: Option<String>,
+    /// Last launch (Unix milliseconds); 0 = never. Orders the home screen.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub last_played: u64,
+    /// Most RAM the game may use (MB, `-Xmx`); `None` = `launch::DEFAULT_MEMORY_MB`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_memory_mb: Option<u32>,
+}
+
+fn is_zero(n: &u64) -> bool {
+    *n == 0
 }
 
 fn is_false(b: &bool) -> bool {
@@ -148,11 +167,87 @@ impl Profiles {
     }
 
 
+    /// Creates a profile (folder named after `name`, see the module docs) with
+    /// an optional icon from `icon_from_file`, adds it to the list and returns its id.
+    pub fn add(&mut self, root: &Path, name: Option<String>, minecraft: &str, max_memory_mb: u32, icon: Option<&image::RgbaImage>) -> Result<String> {
+        let info = ProfileInfo {
+            name,
+            minecraft: Some(minecraft.to_string()),
+            max_memory_mb: Some(max_memory_mb),
+            icon: icon.map(|_| ICON_FILE.to_string()),
+            ..Default::default()
+        };
+        let profile = create(root, ProfileInfo { icon: None, ..info }, None)?;
+        let id = profile.id.clone();
+        self.profiles.push(profile);
+        self.profiles.sort_by(|a, b| (a.info.created, &a.id).cmp(&(b.info.created, &b.id)));
+        if let Some(icon) = icon {
+            self.save_icon(root, &id, icon)?;
+        }
+        Ok(id)
+    }
+
+    /// Changes a profile's details and saves its `profile.json`.
+    pub fn update(&mut self, root: &Path, id: &str, change: impl FnOnce(&mut ProfileInfo)) -> Result<()> {
+        let profile = self.profiles.iter_mut().find(|p| p.id == id).with_context(|| format!("profile {id} not found"))?;
+        let mut info = profile.info.clone();
+        change(&mut info);
+        write_json(&Self::dir(root, id).join(PROFILE_FILE), &info)?;
+        profile.info = info;
+        Ok(())
+    }
+
+    /// Saves `icon` (from `icon_from_file`) as the profile's icon, `icon.png`.
+    pub fn save_icon(&mut self, root: &Path, id: &str, icon: &image::RgbaImage) -> Result<()> {
+        let path = Self::dir(root, id).join(ICON_FILE);
+        icon.save_with_format(&path, image::ImageFormat::Png).with_context(|| format!("saving {}", path.display()))?;
+        self.update(root, id, |info| info.icon = Some(ICON_FILE.to_string()))
+    }
+
+    /// Deletes a profile: `discard` disposes of its folder (the app moves it to
+    /// the Recycle Bin), then it leaves the list. If it was the remembered
+    /// profile, the first one left is remembered instead.
+    pub fn remove(&mut self, root: &Path, id: &str, discard: impl FnOnce(&Path) -> Result<()>) -> Result<()> {
+        anyhow::ensure!(valid_file_name(id), "profile {id} not found");
+        discard(&Self::dir(root, id))?;
+        self.profiles.retain(|p| p.id != id);
+        if self.selected == id {
+            self.selected = self.profiles.first().map(|p| p.id.clone()).unwrap_or_default();
+            let selected_profile = Some(self.selected.clone()).filter(|s| !s.is_empty());
+            write_settings(root, &Settings { selected_profile })?;
+        }
+        Ok(())
+    }
+
+    /// The home screen's list: pinned profiles first (always), then the other
+    /// profiles that have been launched; each group most recently played first.
+    pub fn home_order(&self) -> Vec<&Profile> {
+        let mut shown: Vec<&Profile> = self.profiles.iter().filter(|p| p.info.pinned || p.info.last_played > 0).collect();
+        shown.sort_by(|a, b| (b.info.pinned, b.info.last_played).cmp(&(a.info.pinned, a.info.last_played)));
+        shown
+    }
+
     /// Path of the profile's icon, if it names a plain file inside its folder.
     pub fn icon_path(root: &Path, profile: &Profile) -> Option<PathBuf> {
         let icon = profile.info.icon.as_deref().filter(|n| valid_file_name(n))?;
         Some(Self::dir(root, &profile.id).join(icon))
     }
+}
+
+/// Reads an image file (PNG or JPEG) for a profile icon: the centre square,
+/// scaled to `ICON_PIXELS`.
+pub fn icon_from_file(path: &Path) -> Result<image::RgbaImage> {
+    let size = std::fs::metadata(path).with_context(|| format!("reading {}", path.display()))?.len();
+    anyhow::ensure!(size <= ICON_MAX_BYTES, "{} is too large for an icon", path.display());
+    let bytes = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
+    let image = image::load_from_memory(&bytes).with_context(|| format!("{} isn't a PNG or JPEG image", path.display()))?;
+    Ok(square_icon(image))
+}
+
+fn square_icon(image: image::DynamicImage) -> image::RgbaImage {
+    let side = image.width().min(image.height());
+    let square = image.crop_imm((image.width() - side) / 2, (image.height() - side) / 2, side, side);
+    square.resize_exact(ICON_PIXELS, ICON_PIXELS, image::imageops::FilterType::Lanczos3).to_rgba8()
 }
 
 fn read_settings(root: &Path) -> Settings {
@@ -436,6 +531,78 @@ mod tests {
         assert!(!old.pinned);
         assert!(!serde_json::to_string(&old).unwrap().contains("pinned"));
         assert!(serde_json::to_string(&pinned).unwrap().contains(r#""pinned":true"#));
+    }
+
+    #[test]
+    fn added_profiles_save_name_version_and_icon() {
+        let root = temp_root("add");
+        let mut p = Profiles::load(&root).unwrap();
+        let icon = square_icon(image::DynamicImage::ImageRgba8(image::RgbaImage::new(300, 200)));
+        assert_eq!(icon.dimensions(), (ICON_PIXELS, ICON_PIXELS));
+        let id = p.add(&root, Some("PvP".into()), "26.1.2", 4096, Some(&icon)).unwrap();
+        assert_eq!(id, "PvP");
+        let unnamed = p.add(&root, None, "26.1.2", 4096, None).unwrap();
+        assert_eq!(unnamed, "Unnamed (1)");
+        let loaded = Profiles::load(&root).unwrap();
+        let pvp = loaded.profiles.iter().find(|x| x.id == "PvP").unwrap();
+        assert_eq!(pvp.info.minecraft.as_deref(), Some("26.1.2"));
+        let icon_path = Profiles::icon_path(&root, pvp).unwrap();
+        assert_eq!(image::open(icon_path).unwrap().to_rgba8().dimensions(), (ICON_PIXELS, ICON_PIXELS));
+        assert_eq!(loaded.profiles.len(), p.profiles.len());
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn home_lists_pinned_then_recently_played() {
+        let p = |id: &str, pinned, last_played| Profile { id: id.into(), info: ProfileInfo { pinned, last_played, ..Default::default() } };
+        let profiles = Profiles {
+            selected: String::new(),
+            profiles: vec![p("never", false, 0), p("old", false, 10), p("pin-never", true, 0), p("new", false, 30), p("pin-old", true, 5), p("pin-new", true, 20)],
+        };
+        let ids: Vec<&str> = profiles.home_order().iter().map(|p| p.id.as_str()).collect();
+        assert_eq!(ids, ["pin-new", "pin-old", "pin-never", "new", "old"]);
+    }
+
+    #[test]
+    fn removing_a_profile_drops_its_folder_and_moves_the_selection() {
+        let root = temp_root("remove");
+        let mut profiles = Profiles::load(&root).unwrap();
+        let first = profiles.profiles[0].id.clone();
+        let second = profiles.add(&root, Some("PvP".into()), "26.1.2", 4096, None).unwrap();
+        profiles.select(&root, &second).unwrap();
+        profiles.remove(&root, &second, |dir| Ok(std::fs::remove_dir_all(dir)?)).unwrap();
+        assert!(!Profiles::dir(&root, &second).exists());
+        assert_eq!(profiles.selected, first);
+        assert_eq!(Profiles::load(&root).unwrap().selected, first);
+        assert!(profiles.remove(&root, "..", |_| Ok(())).is_err());
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn updates_are_saved() {
+        let root = temp_root("update");
+        let mut p = Profiles::load(&root).unwrap();
+        let id = p.profiles[0].id.clone();
+        p.update(&root, &id, |info| {
+            info.pinned = true;
+            info.last_played = 42;
+            info.name = Some("Renamed".into());
+        })
+        .unwrap();
+        let loaded = Profiles::load(&root).unwrap();
+        assert_eq!(loaded.profiles[0].info, p.profiles[0].info);
+        assert_eq!(loaded.profiles[0].id, id, "the folder keeps its name");
+        assert!(p.update(&root, "missing", |_| {}).is_err());
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn icon_files_must_be_images() {
+        let root = temp_root("bad-icon");
+        let file = root.join("not-an-image.png");
+        std::fs::write(&file, b"hello").unwrap();
+        assert!(icon_from_file(&file).is_err());
+        std::fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]

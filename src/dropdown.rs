@@ -22,6 +22,11 @@ fn open_id(id: Id) -> Id {
     id.with("open")
 }
 
+/// Whether the dropdown's list is open.
+pub fn is_open(ctx: &Context, id: Id) -> bool {
+    ctx.data(|d| d.get_temp::<bool>(open_id(id))).unwrap_or(false)
+}
+
 /// Id of the collapsed pill's response (keyboard focus target).
 pub fn pill_id(id: Id) -> Id {
     id.with("pill")
@@ -56,7 +61,9 @@ pub fn show(ctx: &Context, id: Id, anchor: Rect, items: &[Item], selected: usize
         response.widget_info(|| WidgetInfo::labeled(Role::ComboBox, true, label));
         // Pressing the pill or any row shrinks the whole control; it springs back on release.
         // Only the drawing scales; hit areas stay put so the press can't slip off.
-        let pressed = ui.input(|i| i.pointer.primary_down() && i.pointer.press_origin().is_some_and(|p| panel.contains(p)));
+        // (Not while something above blocks it, like the create-profile popup.)
+        let reachable = ui.memory(|m| m.allows_interaction(ui.layer_id()));
+        let pressed = reachable && ui.input(|i| i.pointer.primary_down() && i.pointer.press_origin().is_some_and(|p| panel.contains(p)));
         let scale = theme::press_scale(ctx, id, pressed);
         let center = panel.center();
         let sc = |r: Rect| theme::scale_about(r, center, scale);

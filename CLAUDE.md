@@ -21,11 +21,14 @@ Rust launcher (Windows 10/11) for Fabric Minecraft 26.1.2. UI is egui/eframe (gl
 
 - **Rebuild after every change, even small ones** (owner rule): `cargo build --release`, so
   `target\release\hermes.exe` is always current. If the exe is locked, close the running launcher first.
+  After changing the in-game client (`client/`), build it first: `client\gradlew build` with
+  `JAVA_HOME` set to a JDK 25 (e.g. `%USERPROFILE%\.jdks\openjdk-25.0.2`); the launcher embeds
+  `client/build/libs/hermes-client.jar` and won't build without it.
 
-- `cargo test`: unit tests.
+- `cargo test`: unit tests. `cargo test -- --ignored` also runs the ones that talk to Modrinth.
 - `cargo run -- --headless`: runs the Start-button launch path without the window, prints
   timings, waits for the game, fails if it crashes. Game output: `%APPDATA%\HermesClient\logs\game-output.log`.
-- Visual check (debug builds): `cargo run -- --screenshot shot.png [--open-dropdown account] [--state downloading|checking|running|failed] [--focus play|account] [--open-sidebar] [--screenshot-frame N]` renders the
+- Visual check (debug builds): `cargo run -- --screenshot shot.png [--open-dropdown account] [--state downloading|checking|running|failed] [--focus account] [--open-sidebar] [--page home|profiles|profile|settings] [--browse] [--open-create] [--open-edit] [--screenshot-frame N]` renders the
   window, saves it as a PNG once animations settle, and exits.
 
 ## Code map
@@ -34,7 +37,16 @@ Rust launcher (Windows 10/11) for Fabric Minecraft 26.1.2. UI is egui/eframe (gl
 - `lang.rs` + `assets/lang/*.json`: language keys. Add every new key to `en_us.json` with an
   empty value and list it in `app-design.md`.
 - `dropdown.rs`: the one dropdown component (glass, expand in place, arrow-to-check morph).
+- `profile_popup.rs`: the profile popup, creating and editing (egui `Modal`, own dimming clipped to the window).
+- `profile_list.rs`: profile cards (Home and Profiles pages): launch, stop, pin, open the profile page.
+- `profile_page.rs`: a profile's page (header, mod detail pane, mods table, browsing Modrinth).
+  `mods.rs`: reading mod jars, Modrinth lookup / search / install (background runtime).
+  `shell.rs`: open a folder or link with Windows' default handler.
 - `ui.rs`: main window. `launch.rs`: install + start the game, reports progress as `Step`.
 - `profiles.rs`: profiles (`profiles/<name>/profile.json`, each folder is that profile's game folder). `window_shape.rs`: rounded window clip. `game_window.rs`: Stop (close the game window).
 - `build.rs`: embeds `assets/images/app_icon.ico` in the exe (needs the Windows SDK `rc.exe`).
+- `client/`: the **Hermes in-game client**, a Fabric mod (Gradle, Loom 1.19 without mappings, as
+  Minecraft 26.1 is unobfuscated; mod id `hermes`). Empty for now. `client_mod.rs` embeds the
+  built jar, writes it to `<data>\client\hermes-client.jar` and every launch loads it with
+  `-Dfabric.addMods`, so profiles' own `mods` folders stay untouched.
 - The egui screenshot shows the app's own frame only; window-shape changes need a real screen check.
